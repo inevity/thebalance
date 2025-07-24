@@ -1,0 +1,19 @@
+{
+  "name": "one-balance-rust",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "init:config": "cp wrangler.jsonc.tpl wrangler.jsonc",
+    "pre-deploy": "node pre-deploy.mjs",
+    "dev": "pnpm init:config && node ./pre-dev.mjs && pnpm migrate && wrangler dev --port 8087",
+    "migrate": "wrangler d1 migrations apply one-balance --local",
+    "migrate:remote": "wrangler d1 migrations apply one-balance --remote",
+    "deploy": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy",
+    "deploy:dry-run": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy --dry-run",
+    "deploy:reset": "pnpm deploy && wrangler d1 execute one-balance --remote --command \"UPDATE keys SET status = 'active', model_coolings = '{}', total_cooling_seconds = 0;\""
+  },
+  "devDependencies": {
+    "wrangler": "4.26.0"
+  },
+  "packageManager": "pnpm@10.13.1+sha512.37ebf1a5c7a30d5fabe0c5df44ee8da4c965ca0c5af3dbab28c3a1681b70a256218d05c81c9c0dcf767ef6b8551eb5b960042b9ed4300c59242336377e01cfad"
+}

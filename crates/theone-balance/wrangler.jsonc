@@ -1,0 +1,34 @@
+{
+    "$schema": "https://developers.cloudflare.com/workers/wrangler/wrangler-schema.json",
+    "name": "one-balance-rust",
+    "main": "build/worker/shim.mjs",
+    "compatibility_date": "2025-07-21",
+    "build": {
+        "command": "cargo install -q worker-build && worker-build --release"
+    },
+    "d1_databases": [
+        {
+            "binding": "DB",
+            "database_name": "one-balance",
+            "database_id": "",
+            "migrations_dir": "migrations"
+        }
+    ],
+    "queues": {
+        "producers": [
+            {
+                "queue": "state-updater",
+                "binding": "STATE_UPDATER"
+            }
+        ],
+        "consumers": [
+            {
+                "queue": "state-updater"
+            }
+        ]
+    },
+    "vars": {
+        "AUTH_KEY": "local-auth-key",
+        "AI_GATEWAY_TOKEN": "local-ai-gateway-token"
+    }
+}
