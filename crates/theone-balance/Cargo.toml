@@ -1,0 +1,68 @@
+[package]
+name = "one-balance-rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# By default, we will use the recommended pattern: a Durable Object with its internal SQLite DB.
+default = ["raw_d1"]
+
+# --- Router Features ---
+axumrouter = ["axum", "http", "http-body", "tower-service"]
+
+# --- Storage Strategy Features ---
+# Strategy 1: Durable Object with its built-in Key-Value storage.
+do_kv = []
+# Strategy 2: Durable Object with its built-in SQLite database.
+do_sqlite = ["worker/d1"] # The 'd1' worker feature enables DO SQLite storage.
+# Strategy 3: Main worker accesses a D1 database directly.
+raw_d1 = ["worker/d1"]
+# Strategy 4: An intentionally broken feature to prove a DO cannot access a D1 binding.
+do_d1 = ["worker/d1"]
+
+
+[dependencies]
+# We disable default features to have precise control via our own feature flags.
+# worker = { version = "0.6.0", default-features = false, features = ["macros", "d1"] }
+worker = { version ="0.6", default-features = false, features = ["d1", "http", "axum", "timezone", "queue"] }
+#worker = { path = "../../workers-rs/worker", default-features = false, features = ["d1", "http", "axum", "timezone", "queue"] }
+
+# Serialization and Deserialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP Client to call Google APIs
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging and Debugging
+tracing = "0.1"
+console_error_panic_hook = "0.1.7"
+
+# Utilities
+uuid = { version = "1.8", features = ["v4", "js"] }
+url = "2.5"
+js-sys = "0.3"
+
+# --- Optional Axum Dependencies ---
+axum = { version = "0.8", optional = true }
+http = { version = "1.3", optional = true }
+http-body = { version = "1.0", optional = true }
+tower-service = { version = "0.3", optional = true }
+
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "s"
+
+# [package.metadata.wasm-pack.profile.release]
+# wasm-opt = false
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
