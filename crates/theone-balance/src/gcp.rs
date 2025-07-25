@@ -5,6 +5,8 @@
 use crate::models::{
     GeminiContent, GeminiEmbeddingContent, GeminiEmbeddingsRequest, GeminiEmbeddingsResponse, GeminiPart,
     OpenAiEmbedding, OpenAiEmbeddingsRequest, OpenAiEmbeddingsResponse, OpenAiUsage,
+    OpenAiChatCompletionRequest, GeminiChatRequest, GeminiChatResponse, OpenAiChatCompletionResponse,
+    OpenAiChatChoice, OpenAiChatMessage,
 };
 
 /// Translates an OpenAI-compatible embeddings request into a native Gemini embeddings request.
@@ -51,3 +53,59 @@ pub fn translate_embeddings_response(
         usage: OpenAiUsage::default(),
     }
 }
+
+/// Translates an OpenAI-compatible chat completion request into a native Gemini chat request.
+pub fn translate_chat_request(req: OpenAiChatCompletionRequest) -> GeminiChatRequest {
+    let contents = req
+        .messages
+        .into_iter()
+        .map(|msg| GeminiContent {
+            parts: vec![GeminiPart { text: msg.content }],
+            role: Some(map_role_to_gemini(msg.role)),
+        })
+        .collect();
+
+    GeminiChatRequest { contents }
+}
+
+/// Translates a native Gemini chat response back into an OpenAI-compatible one.
+pub fn translate_chat_response(
+    gemini_resp: GeminiChatResponse,
+    model_name: &str,
+) -> OpenAiChatCompletionResponse {
+    let choices = gemini_resp
+        .candidates
+        .into_iter()
+        .map(|candidate| OpenAiChatChoice {
+            finish_reason: candidate.finish_reason,
+            index: candidate.index,
+            message: OpenAiChatMessage {
+                role: "assistant".to_string(), // Gemini response roles are not consistently provided
+                content: candidate.content.parts.get(0).map_or("".to_string(), |p| p.text.clone()),
+            },
+        })
+        .collect();
+
+    OpenAiChatCompletionResponse {
+        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+        choices,
+        created: js_sys::Date::now() as u64 / 1000,
+        model: model_name.to_string(),
+        object: "chat.completion".to_string(),
+        // Gemini API does not provide token usage for chat.
+        usage: OpenAiUsage::default(),
+    }
+}
+
+/// Maps OpenAI role names to Gemini role names.
+fn map_role_to_gemini(role: String) -> String {
+    match role.as_str() {
+        "user" => "user".to_string(),
+        "assistant" => "model".to_string(),
+        // Gemini doesn't have a direct equivalent of "system" prompt,
+        // it's often handled as the first "user" message.
+        "system" => "user".to_string(), 
+        _ => "user".to_string(),
+    }
+}
+

@@ -169,21 +169,55 @@ pub async fn forward(mut req: Request, ctx: RouteContext<()>) -> Result<Response
         }
 
         // --- 5. Standard AI Gateway Request for all other endpoints ---
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let gateway_req = make_gateway_request(
-            req.method(),
-            req.headers(),
-            Some(body_bytes.clone()),
-            &ctx,
-            &rest_resource,
-            &selected_key.key,
-            &request_id,
-        ).await?;
-        
-        let mut resp = worker::Fetch::Request(gateway_req).send().await?;
+        let is_local_dev = ctx.env.var("IS_LOCAL").map(|v| v.to_string() == "true").unwrap_or(false);
 
+        let final_req = if is_local_dev {
+            // In local dev, proxy directly to the native provider endpoint.
+            if provider != "google-ai-studio" {
+                return create_openai_error_response("Local dev proxy only supports google-ai-studio", "server_error", "not_supported", 501);
+            }
+            
+            let mut headers = req.headers().clone();
+            set_auth_header(&mut headers, &provider, &selected_key.key)?;
+            
+            let mut req_init = worker::RequestInit::new();
+            req_init.with_method(req.method()).with_headers(headers);
+
+            let url = if rest_resource.starts_with("compat/chat/completions") {
+                 let openapi_req: OpenAiChatCompletionRequest = serde_json::from_slice(&body_bytes)?;
+                 let gemini_req_body = gcp::translate_chat_request(openapi_req);
+                 req_init.with_body(Some(serde_json::to_vec(&gemini_req_body)?.into()));
+                 format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name)
+            } else {
+                let native_path = rest_resource.strip_prefix("google-ai-studio/").unwrap_or(&rest_resource);
+                req_init.with_body(Some(body_bytes.clone().into()));
+                format!("https://generativelanguage.googleapis.com/{}", native_path)
+            };
+                
+            Request::new_with_init(&url, &req_init)?
+        } else {
+            // In production, use the AI Gateway.
+            let request_id = uuid::Uuid::new_v4().to_string();
+            make_gateway_request(
+                req.method(),
+                req.headers(),
+                Some(body_bytes.clone()),
+                &ctx,
+                &rest_resource,
+                &selected_key.key,
+                &request_id,
+            ).await?
+        };
+        
+        let mut resp = worker::Fetch::Request(final_req).send().await?;
+        
         if resp.status_code() == 200 {
-            return Ok(resp);
+            if is_local_dev && rest_resource.starts_with("compat/chat/completions") {
+                let gemini_resp: GeminiChatResponse = resp.json().await?;
+                let openapi_resp = gcp::translate_chat_response(gemini_resp, &model_name);
+                return Response::from_json(&openapi_resp);
+            }
+            return Ok(resp)
         }
 
         // --- 6. Error Handling for Gateway Requests ---
@@ -231,19 +265,29 @@ async fn handle_embeddings_fallback(
     model_name: &str,
     queue: &worker::Queue,
 ) -> Result<Response> {
+    let is_local_dev = ctx.env.var("IS_LOCAL").map(|v| v.to_string() == "true").unwrap_or(false);
 
-    // --- Attempt 2: AI Gateway (Provider-Specific) ---
-    // We skip attempt 1 because we know it will fail.
-    
     let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(body_bytes)?;
     let gemini_req_body = gcp::translate_embeddings_request(openapi_req, model_name);
     let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
 
+    // In local development, we only make one attempt directly to the native API.
+    if is_local_dev {
+        return try_native_embeddings_request(
+            selected_key,
+            model_name,
+            &gemini_body_bytes,
+            queue,
+        ).await;
+    }
+
+    // --- Attempt 2: AI Gateway (Provider-Specific) ---
+    // In production, we first try the gateway's provider-specific endpoint.
     let provider_rest_resource = format!("google-ai-studio/v1beta/models/{}:batchEmbedContents", model_name);
     
     let gateway_req = make_gateway_request(
         worker::Method::Post,
-        &worker::Headers::new(), // new headers
+        &worker::Headers::new(),
         Some(gemini_body_bytes.clone()),
         ctx,
         &provider_rest_resource,
@@ -262,8 +306,24 @@ async fn handle_embeddings_fallback(
 
 
     // --- Attempt 3: Native Google API ---
+    // If the gateway fails, we try the native API directly.
+    try_native_embeddings_request(
+        selected_key,
+        model_name,
+        &gemini_body_bytes,
+        queue,
+    ).await
+}
+
+/// Helper function for the native Google API part of the embeddings fallback.
+async fn try_native_embeddings_request(
+    selected_key: &ApiKey,
+    model_name: &str,
+    gemini_body_bytes: &[u8],
+    queue: &worker::Queue,
+) -> Result<Response> {
     let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents", model_name);
-    let headers = worker::Headers::new();
+    let mut headers = worker::Headers::new();
     headers.set("Content-Type", "application/json")?;
     headers.set("x-goog-api-key", &selected_key.key)?;
 
@@ -271,7 +331,7 @@ async fn handle_embeddings_fallback(
     req_init
         .with_method(worker::Method::Post)
         .with_headers(headers)
-        .with_body(Some(gemini_body_bytes.into()));
+        .with_body(Some(gemini_body_bytes.to_vec().into()));
     
     let native_req = worker::Request::new_with_init(&native_endpoint, &req_init)?;
     let mut native_resp = worker::Fetch::Request(native_req).send().await?;
@@ -281,10 +341,9 @@ async fn handle_embeddings_fallback(
         let openapi_resp = gcp::translate_embeddings_response(gemini_resp, model_name);
         return Response::from_json(&openapi_resp);
     }
-    worker::console_warn!("Embeddings Fallback Attempt 3 (Native API) failed with status {}.", native_resp.status_code());
+    worker::console_warn!("Embeddings Native API request failed with status {}.", native_resp.status_code());
 
-    // If both attempts fail, we analyze the error from the *native* response
-    // to decide whether to block or cool down the key.
+    // If the attempt fails, analyze the error to decide whether to block or cool down the key.
     let status = native_resp.status_code();
     let error_body_text = native_resp.text().await?;
     match error_handling::analyze_error_with_retries("google-ai-studio", status, &error_body_text).await {
@@ -306,9 +365,8 @@ async fn handle_embeddings_fallback(
         _ => {} // Ignore other errors for now
     }
     
-    // Return a generic error indicating this key failed all fallbacks.
-    // The main loop will then try the next key.
-    Err("All embedding fallbacks failed for this key.".into())
+    // Return a generic error indicating this key failed. The main loop will then try the next key.
+    Err("Native embeddings request failed for this key.".into())
 }
 
 

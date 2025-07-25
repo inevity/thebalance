@@ -64,6 +64,25 @@ pub struct OpenAiError {
     pub code: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OpenAiChatCompletionResponse {
+    pub id: String,
+    pub choices: Vec<OpenAiChatChoice>,
+    pub created: u64,
+    pub model: String,
+    pub object: String,
+    pub usage: OpenAiUsage,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenAiChatChoice {
+    pub finish_reason: String,
+    pub index: u32,
+    pub message: OpenAiChatMessage,
+}
+
+
 
 // =================================================================================
 // == Native Google Gemini API Models (for /google-ai-studio/... proxy routes AND internal embeddings translation) ==
