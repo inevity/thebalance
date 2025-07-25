@@ -58,11 +58,9 @@ async function main() {
         IS_LOCAL: "true"
     };
 
+    console.log('Setting/overwriting local development variables...');
     for (const [key, value] of Object.entries(varsToSet)) {
-        if (!config.vars[key]) {
-            console.log(`Setting default local var: ${key}`);
-            config.vars[key] = value;
-        }
+        config.vars[key] = value;
     }
 
  //   // Ensure local D1 databases exist.

@@ -49,6 +49,10 @@ console_error_panic_hook = "0.1.7"
 uuid = { version = "1.8", features = ["v4", "js"] }
 url = "2.5"
 js-sys = "0.3"
+rand = "0.8"
+phf = { version = "0.11", features = ["macros"] }
+getrandom = { version = "0.2", features = ["js"] }
+
 
 # --- Optional Axum Dependencies ---
 axum = { version = "0.8", optional = true }

@@ -31,9 +31,10 @@
         ]
     },
     "vars": {
-        "AUTH_KEY": "my-auth-key",
+        "AUTH_KEY": "local-auth-key",
         "AI_GATEWAY": "one-balance",
-        "CLOUDFLARE_ACCOUNT_ID": "YOUR_ACCOUNT_ID_HERE",
-        "CLOUDFLARE_API_TOKEN": "xxxxx"
+        "CLOUDFLARE_ACCOUNT_ID": "local_account_id",
+        "CLOUDFLARE_API_TOKEN": "local-cf-api-token",
+        "IS_LOCAL": "true"
     }
 }

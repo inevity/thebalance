@@ -6,6 +6,7 @@ pub mod handlers;
 pub mod models;
 pub mod queue;
 pub mod router;
+pub mod util;
 pub mod state {
     pub mod strategy;
 }
@@ -22,7 +23,7 @@ pub mod state_do_d1_broken;
 use worker::*;
 
 #[event(fetch)]
-pub async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // When the `raw_d1` feature is enabled, we need a way to route requests
     // to the D1-specific handlers instead of the Durable Object.
     // Here, we'll check the path and if it's a key management route,

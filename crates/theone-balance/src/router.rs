@@ -1,12 +1,9 @@
-use worker::{Router, RouteContext, Request, Response, Result};
+use worker::Router;
 use crate::handlers;
 
 pub fn new() -> Router<'static, ()> {
     Router::new()
-        // OpenAI-Compatible Routes
-        .post_async("/api/compat/embeddings", handlers::handle_openai_embeddings)
-        .post_async("/api/compat/chat/completions", handlers::handle_openai_chat_completions)
-
-        // Native Proxy Routes (AI Gateway)
-        .post_async("/api/google-ai-studio/*path", handlers::handle_google_proxy)
+        // All API requests are now handled by the unified `forward` function.
+        // It will internally determine the correct logic (e.g., embeddings fallback) based on the path.
+        .on_async("/api/*path", handlers::forward)
 }

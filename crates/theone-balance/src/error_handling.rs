@@ -13,7 +13,9 @@ pub enum ErrorAnalysis {
     /// The key is rate-limited and should be put on cooldown for a specific duration.
     KeyOnCooldown(Duration),
     /// The error is not key-related and should be returned to the client.
-    PropagateError,
+    UserError,
+    /// The error is unrecognized.
+    Unknown,
 }
 
 /// Analyzes a Google API error response to determine the cause.
@@ -73,3 +75,32 @@ pub fn key_is_invalid_from_error(error_body: &GoogleErrorResponse) -> bool {
     }
     false
 }
+
+/// A new, more generic error analysis function that handles different providers
+/// and status codes before delegating to provider-specific logic.
+pub async fn analyze_error_with_retries(provider: &str, status: u16, body_text: &str) -> ErrorAnalysis {
+    match status {
+        401 | 403 => return ErrorAnalysis::KeyIsInvalid,
+        400 => {
+            // For a 400, it could be a user error or an invalid key. We need to check.
+            if provider == "google-ai-studio" {
+                 let error_body: GoogleErrorResponse = serde_json::from_str(body_text).unwrap_or_default();
+                 if key_is_invalid_from_error(&error_body) {
+                     return ErrorAnalysis::KeyIsInvalid;
+                 }
+            }
+            // If it's not a known invalid key error, it's a user error.
+            return ErrorAnalysis::UserError;
+        }
+        429 | 503 => {
+            if provider == "google-ai-studio" {
+                let error_body: GoogleErrorResponse = serde_json::from_str(body_text).unwrap_or_default();
+                return analyze_google_error(&error_body);
+            }
+            // Fallback for other providers
+            return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DEFAULT_COOLDOWN_SECONDS));
+        }
+        _ => ErrorAnalysis::Unknown,
+    }
+}
+
