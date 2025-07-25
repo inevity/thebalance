@@ -49,6 +49,7 @@ async fn get_active_keys(provider: &str, ctx: &RouteContext<()>) -> Result<Vec<A
 }
 
 
+#[worker::send]
 pub async fn handle_openai_embeddings(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let queue = ctx.env.queue("STATE_UPDATER")?;
     // 1. Parse the incoming request.
@@ -210,9 +211,43 @@ async fn forward_request(mut req: Request, ctx: RouteContext<()>, is_openai_comp
             }
         }
         
-        // We need to reconstruct the request with the original body for each attempt.
-        let mut gateway_req = req.clone()?;
-        gateway_req.headers_mut()?.set("X-API-Key", &selected_key.key)?;
+        let mut req_init = worker::RequestInit::new();
+        req_init
+            .with_method(req.method())
+            .with_body(Some(body_bytes.clone().into()));
+        
+        let is_local_dev = ctx.env.var("IS_LOCAL").map(|v| v.to_string() == "true").unwrap_or(false);
+
+        let final_url = if is_local_dev {
+            // --- LOCAL DEVELOPMENT PATH ---
+            // The request path is /api/google-ai-studio/v1/models/...
+            // We need to strip the prefix and send to the native Google endpoint.
+            let native_path = req.path().strip_prefix("/api/google-ai-studio/").unwrap_or_else(|| req.path()).to_string();
+            format!("https://generativelanguage.googleapis.com/{}", native_path)
+        } else {
+            // --- PRODUCTION PATH ---
+            let account_id = ctx.env.var("CLOUDFLARE_ACCOUNT_ID")?.to_string();
+            let gateway_name = ctx.env.var("AI_GATEWAY")?.to_string();
+            let base_url = format!("https://gateway.ai.cloudflare.com/v1/{}/{}", account_id, gateway_name);
+            
+            let request_path = req.path();
+            // Strip /api prefix to get the path for the gateway (e.g. /compat/chat/completions)
+            let final_path = request_path.strip_prefix("/api").unwrap_or(&request_path);
+            format!("{}{}", base_url, final_path)
+        };
+
+        let mut gateway_req = worker::Request::new_with_init(&final_url, &req_init)?;
+        
+        // Set headers. For local dev, this will be the direct provider key.
+        // For production, this will be the key the AI Gateway uses to authenticate with the provider.
+        gateway_req.headers_mut()?.set("x-goog-api-key", &selected_key.key)?;
+        
+        // For production, also add the AI Gateway auth token.
+        if !is_local_dev {
+            if let Ok(token) = ctx.env.var("AI_GATEWAY_TOKEN") {
+                gateway_req.headers_mut()?.set("cf-aig-authorization", &format!("Bearer {}", token.to_string()))?;
+            }
+        }
         
         let mut gateway_resp = worker::Fetch::Request(gateway_req).send().await?;
         
@@ -273,10 +308,12 @@ async fn forward_request(mut req: Request, ctx: RouteContext<()>, is_openai_comp
 }
 
 
+#[worker::send]
 pub async fn handle_openai_chat_completions(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     forward_request(req, ctx, true).await
 }
 
+#[worker::send]
 pub async fn handle_google_proxy(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     forward_request(req, ctx, false).await
 }

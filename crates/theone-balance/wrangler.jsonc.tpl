@@ -6,11 +6,14 @@
     "build": {
         "command": "cargo install -q worker-build && worker-build --release"
     },
+    "ai": {
+        "binding": "AI"
+    },
     "d1_databases": [
         {
             "binding": "DB",
             "database_name": "one-balance",
-            "database_id": "",
+            "database_id": "xfefef",
             "migrations_dir": "migrations"
         }
     ],
@@ -27,5 +30,13 @@
             }
         ]
     },
-    "vars": {}
+    "vars": {
+        "AUTH_KEY": "my-auth-key",
+        "AI_GATEWAY": "one-balance",
+        "CLOUDFLARE_ACCOUNT_ID": "YOUR_ACCOUNT_ID_HERE",
+        "CLOUDFLARE_API_TOKEN": "xxxxx",
+        "IS_LOCAL": "false"
+
+    }
+
 }
