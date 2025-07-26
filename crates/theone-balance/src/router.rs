@@ -1,9 +1,12 @@
-use worker::Router;
-use crate::handlers;
+use crate::{handlers, web, AppState};
+use axum::{routing::post, Router};
 
-pub fn new() -> Router<'static, ()> {
+pub fn new() -> Router<AppState> {
     Router::new()
+        .merge(web::ui_router())
         // All API requests are now handled by the unified `forward` function.
         // It will internally determine the correct logic (e.g., embeddings fallback) based on the path.
-        .on_async("/api/*path", handlers::forward)
+        .route("/api/{*path}", post(handlers::forward))
 }
+
+

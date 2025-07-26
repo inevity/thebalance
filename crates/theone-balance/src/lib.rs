@@ -7,6 +7,7 @@ pub mod models;
 pub mod queue;
 pub mod router;
 pub mod util;
+pub mod web;
 pub mod state {
     pub mod strategy;
 }
@@ -20,24 +21,27 @@ pub mod state_do_sqlite;
 #[cfg(feature = "do_d1")]
 pub mod state_do_d1_broken;
 
+use tower_service::Service;
+use worker::send::SendWrapper;
 use worker::*;
 
-#[event(fetch)]
-pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // When the `raw_d1` feature is enabled, we need a way to route requests
-    // to the D1-specific handlers instead of the Durable Object.
-    // Here, we'll check the path and if it's a key management route,
-    // we'll send it to the `d1_storage` module. Otherwise, we'll use the main router.
-    #[cfg(feature = "raw_d1")]
-    {
-        if req.path().starts_with("/keys") {
-            return d1_storage::handle_request(req, &env).await;
-        }
-    }
+#[derive(Clone)]
+pub struct AppState {
+    pub env: SendWrapper<Env>,
+}
 
-    // For all other features, or for `raw_d1` requests that are not for key management,
-    // we'll use the default router which is designed to work with Durable Objects.
-    router::new().run(req, env).await
+#[event(fetch)]
+pub async fn fetch(
+    req: HttpRequest,
+    env: Env,
+    _ctx: Context,
+) -> Result<axum::http::Response<axum::body::Body>> {
+    console_error_panic_hook::set_once();
+    let app_state = AppState {
+        env: SendWrapper::new(env),
+    };
+    let mut router = router::new().with_state(app_state);
+    Ok(router.call(req).await?)
 }
 
 // We also add a scheduled event handler to satisfy the build warning.

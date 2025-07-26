@@ -4,6 +4,18 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use worker::{Env, Request, Result};
 
+/// Extracts the API key from the Authorization header of an axum request.
+pub fn get_auth_key_from_axum_header(req: &axum::extract::Request) -> Result<String> {
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                return Ok(auth_str[7..].to_string());
+            }
+        }
+    }
+    Ok("".to_string())
+}
+
 /// Extracts the API key from the Authorization header.
 pub fn get_auth_key_from_header(req: &Request) -> Result<String> {
     if let Some(auth_header) = req.headers().get("Authorization")? {

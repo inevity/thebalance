@@ -8,6 +8,53 @@ use uuid::Uuid;
 use js_sys::Date;
 use std::collections::HashMap;
 
+pub async fn list_keys(
+    db: &D1Database,
+    provider: &str,
+    status: &str,
+    q: &str,
+    page: usize,
+    page_size: usize,
+    sort_by: &str,
+    sort_order: &str,
+) -> Result<(Vec<ApiKey>, i32)> {
+    let mut query_builder = String::from("SELECT * FROM keys WHERE provider = ?1 AND status = ?2");
+    if !q.is_empty() {
+        query_builder.push_str(" AND key LIKE ?3");
+    }
+
+    let sort_column = match sort_by {
+        "createdAt" => "created_at",
+        "totalCoolingSeconds" => "total_cooling_seconds",
+        _ => "updated_at",
+    };
+    let order = if sort_order == "asc" { "ASC" } else { "DESC" };
+    query_builder.push_str(&format!(" ORDER BY {} {}", sort_column, order));
+
+    let offset = (page - 1) * page_size;
+    query_builder.push_str(&format!(" LIMIT {} OFFSET {}", page_size, offset));
+
+    let statement = if !q.is_empty() {
+        let search_term = format!("%{}%", q);
+        query!(db, &query_builder, provider, status, search_term)?
+    } else {
+        query!(db, &query_builder, provider, status)?
+    };
+
+    let results = statement.all().await?;
+    let db_rows = results.results::<ApiKeyDbRow>()?;
+    let api_keys: Vec<ApiKey> = db_rows.into_iter().filter_map(|r| r.try_into().ok()).collect();
+
+    // For simplicity, we'll get the total count in a separate query.
+    // In a production app, you might use a more efficient way to get total count.
+    let count_query = "SELECT COUNT(*) as count FROM keys WHERE provider = ?1 AND status = ?2";
+    let count_statement = query!(db, count_query, provider, status)?;
+    let total: i32 = count_statement.first(Some("count")).await?.unwrap_or(0);
+
+    Ok((api_keys, total))
+}
+
+
 // This struct represents the data as it is stored in the SQLite database.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ApiKeyDbRow {

@@ -1,7 +1,27 @@
 //! This module contains logic for analyzing provider and gateway errors.
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response as AxumResponse};
 use crate::models::GoogleErrorResponse;
 use std::time::Duration;
+use worker::{Error as WorkerError, Response as WorkerResponse};
+
+// --- Newtype Wrappers to solve the Orphan Rule ---
+
+pub struct AxumWorkerResponse(pub WorkerResponse);
+pub struct AxumWorkerError(pub WorkerError);
+
+impl IntoResponse for AxumWorkerResponse {
+    fn into_response(self) -> AxumResponse {
+        AxumResponse::try_from(self.0).unwrap()
+    }
+}
+
+impl IntoResponse for AxumWorkerError {
+    fn into_response(self) -> AxumResponse {
+        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+    }
+}
 
 const DEFAULT_COOLDOWN_SECONDS: u64 = 65;
 const DAILY_COOLDOWN_SECONDS: u64 = 24 * 60 * 60;
