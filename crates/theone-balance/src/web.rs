@@ -550,6 +550,7 @@ fn build_table_header(
     let delete_all_button = if current_status == "blocked" {
         html! {
             button type="submit" name="action" value="delete-all-blocked"
+                    onclick="return confirm('Are you sure you want to delete all blocked keys? This action cannot be undone.');"
                     class="px-4 py-2.5 bg-red-800 hover:bg-red-900 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-red-800/25 hover:-translate-y-0.5 border border-red-800" {
                 "Delete ALL"
             }
