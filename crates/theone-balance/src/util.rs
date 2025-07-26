@@ -1,7 +1,6 @@
 //! Utility functions for request handling, parsing, and data manipulation.
 
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use worker::{Env, Request, Result};
 
 /// Extracts the API key from the Authorization header of an axum request.
@@ -38,7 +37,10 @@ pub fn is_valid_auth_key(key: &str, env: &Env) -> bool {
 }
 
 /// Extracts the provider and model from the request body or the resource path.
-pub fn extract_provider_and_model(body_bytes: &[u8], rest_resource: &str) -> Result<(String, String)> {
+pub fn extract_provider_and_model(
+    body_bytes: &[u8],
+    rest_resource: &str,
+) -> Result<(String, String)> {
     // Try to get from body first
     if let Ok(json_body) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
         if let Some(model_str) = json_body.get("model").and_then(|m| m.as_str()) {
@@ -56,18 +58,16 @@ pub fn extract_provider_and_model(body_bytes: &[u8], rest_resource: &str) -> Res
         // For now, we rely on the body parsing above. This part might need more robust logic
         // if we have compat routes that don't specify model in the body.
     }
-    
+
     // As a last resort, extract from path like `google-ai-studio/gemini-pro`
     if parts.len() >= 2 {
         return Ok((parts[0].to_string(), parts[1..].join("/")));
     }
-
 
     Err("Could not determine provider and model from request.".into())
 }
 
 /// Shuffles a slice of API keys in place.
 pub fn shuffle_keys<T>(keys: &mut [T]) {
-    let mut rng = thread_rng();
-    keys.shuffle(&mut rng);
+    keys.shuffle(&mut rand::rng());
 }

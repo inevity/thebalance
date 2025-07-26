@@ -52,7 +52,10 @@ pub fn ui_router() -> Router<AppState> {
             "/login",
             get(get_login_page_handler).post(post_login_handler),
         )
-        .route("/keys/:provider", get(get_keys_list_page_handler))
+        .route(
+            "/keys/:provider",
+            get(get_keys_list_page_handler).post(post_keys_list_handler),
+        )
 }
 
 // --- Handlers ---
@@ -103,15 +106,13 @@ pub struct KeysListParams {
 }
 
 #[axum::debug_handler]
+
 pub async fn get_keys_list_page_handler(
+    _layout: PageLayout,
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Query(params): Query<KeysListParams>,
-    auth: Result<PageLayout, WebError>,
 ) -> impl IntoResponse {
-    if auth.is_err() {
-        return auth.err().unwrap().into_response();
-    }
     let status = params.status.as_deref().unwrap_or("active");
     let q = params.q.as_deref().unwrap_or("");
     let page = params.page.unwrap_or(1);
@@ -147,7 +148,12 @@ pub async fn get_keys_list_page_handler(
         sort_by, sort_order,
     );
 
-    (StatusCode::OK, content).into_response()
+    (StatusCode::OK, page_layout(content)).into_response()
+}
+
+pub async fn post_keys_list_handler() -> impl IntoResponse {
+    // TODO: Implement this handler
+    (StatusCode::NOT_IMPLEMENTED, "Not Implemented")
 }
 
 //#[axum::debug_handler]
@@ -835,6 +841,7 @@ fn build_model_coolings_modal() -> Markup {
     }
 }
 
+/*
 // --- Authentication & Error Handling ---
 
 // region: --- WebError
@@ -863,6 +870,7 @@ impl From<worker::Error> for WebError {
     }
 }
 // endregion: --- WebError
+*/
 
 // region: --- PageLayout Extractor
 pub struct PageLayout;
@@ -872,17 +880,18 @@ where
     S: Send + Sync,
     AppState: FromRef<S>,
 {
-    type Rejection = WebError;
+    type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         let cookies = Cookies::from_request_parts(parts, state)
             .await
             .map_err(|rejection| {
-                WebError::Worker(worker::Error::from(format!(
-                    "{} {}",
-                    rejection.0, rejection.1
-                )))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cookie error: {} {}", rejection.0, rejection.1),
+                )
+                    .into_response()
             })?;
 
         if let Some(cookie) = cookies.get("auth_key") {
@@ -892,7 +901,7 @@ where
             }
         }
 
-        Err(WebError::Auth)
+        Err(Redirect::to("/login").into_response())
     }
 }
 //impl<S> FromRequestParts<S> for PageLayout
