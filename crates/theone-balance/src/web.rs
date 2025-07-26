@@ -618,11 +618,11 @@ fn build_search_form(provider: &str, current_status: &str) -> Markup {
 
 fn build_table_content(
     key_rows: &Markup,
-    _provider: &str,
-    _current_status: &str,
-    _q: &str,
-    _sort_by: &str,
-    _sort_order: &str,
+    provider: &str,
+    current_status: &str,
+    q: &str,
+    sort_by: &str,
+    sort_order: &str,
 ) -> Markup {
     html! {
         div class="overflow-x-auto" {
@@ -641,8 +641,8 @@ fn build_table_content(
                                    class="h-4 w-4 text-blue-600 bg-white border-gray-500 rounded focus:ring-blue-500 transition-colors backdrop-blur-sm";
                         }
                         th class="p-4 text-left font-semibold text-slate-800 text-sm tracking-wide" { "API Key" }
-                        th class="p-4 text-left font-semibold text-slate-800 text-sm tracking-wide" { "Cooling Time" }
-                        th class="p-4 text-left font-semibold text-slate-800 text-sm tracking-wide" { "Used Time" }
+                        (sortable_th("Cooling Time", "totalCoolingSeconds", provider, current_status, q, sort_by, sort_order))
+                        (sortable_th("Used Time", "createdAt", provider, current_status, q, sort_by, sort_order))
                     }
                 }
                 tbody class="divide-y divide-gray-300/60" {
@@ -673,6 +673,39 @@ fn build_key_rows(keys: Vec<ApiKey>) -> Markup {
                           onclick=(format!("showModelCoolings('{}', '{}')", k.id, k.key)) { (format_cooling_time(k.total_cooling_seconds)) }
                 }
                 td class="p-4 text-sm text-slate-700 font-medium" { (format_used_time(k.created_at)) }
+            }
+        }
+    }
+}
+
+fn sortable_th(
+    title: &str,
+    sort_key: &str,
+    provider: &str,
+    status: &str,
+    q: &str,
+    sort_by: &str,
+    sort_order: &str,
+) -> Markup {
+    let (new_sort_order, icon) = if sort_by == sort_key {
+        if sort_order == "asc" {
+            ("desc", "▲")
+        } else {
+            ("asc", "▼")
+        }
+    } else {
+        ("desc", "")
+    };
+
+    let link = build_page_link(provider, status, q, 1, 20, sort_key, new_sort_order);
+
+    html! {
+        th class="p-4 text-left font-semibold text-slate-800 text-sm tracking-wide" {
+            a href=(link) class="flex items-center gap-1 hover:text-blue-600 transition-colors" {
+                (title)
+                @if !icon.is_empty() {
+                    span class="text-blue-600" { (icon) }
+                }
             }
         }
     }
