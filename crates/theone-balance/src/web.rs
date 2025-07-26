@@ -262,6 +262,18 @@ pub async fn post_keys_list_handler(
                 }
             }
         }
+    } else if form.action == "delete-all-blocked" {
+        let db = state.env.d1("DB").unwrap();
+        match d1_storage::delete_all_blocked(&db, &provider).await {
+            Ok(_) => (), // All good
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to delete all blocked keys: {}", e),
+                )
+                    .into_response()
+            }
+        }
     }
 
     // Redirect back to the keys list page

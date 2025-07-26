@@ -109,6 +109,11 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
+    query!(db, "DELETE FROM keys WHERE provider = ?1 AND status = 'blocked'", provider)?.run().await?;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ApiKeyDbRow {
     id: String,
