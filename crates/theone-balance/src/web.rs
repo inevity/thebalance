@@ -4,7 +4,7 @@ use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
 use axum::{
     extract::{Form, FromRef, FromRequest, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Json, Redirect, Response},
     routing::get,
     RequestPartsExt, Router,
 };
@@ -53,9 +53,10 @@ pub fn ui_router() -> Router<AppState> {
             get(get_login_page_handler).post(post_login_handler),
         )
         .route(
-            "/keys/:provider",
+            "/keys/{provider}",
             get(get_keys_list_page_handler).post(post_keys_list_handler),
         )
+        .route("/api/keys/{id}/coolings", get(get_key_coolings_handler))
 }
 
 // --- Handlers ---
@@ -324,6 +325,36 @@ pub async fn post_keys_list_handler(
 //    (StatusCode::OK, content).into_response()
 //}
 // endregion: --- Keys List Page Handlers
+
+// region: --- API Handlers
+#[worker::send]
+pub async fn get_key_coolings_handler(
+    State(state): State<crate::AppState>,
+    Path(id): Path<String>,
+    _layout: PageLayout,
+) -> Response {
+    let db = match state.env.d1("DB") {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+                .into_response()
+        }
+    };
+
+    match d1_storage::get_key_coolings(&db, &id).await {
+        Ok(Some(key)) => (StatusCode::OK, Json(key)).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Key not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to get key coolings: {}", e),
+        )
+            .into_response(),
+    }
+}
+// endregion: --- API Handlers
 
 // --- Page Components (Maud HTML) ---
 
@@ -638,7 +669,8 @@ fn build_key_rows(keys: Vec<ApiKey>) -> Markup {
                 }
                 td class="p-4" {
                     span class="text-sm text-slate-800 cursor-pointer hover:text-blue-700 transition-colors duration-200 font-medium px-2 py-1 rounded-md hover:bg-blue-100/80 backdrop-blur-sm"
-                          title="Click to view model cooling details" { (format_cooling_time(k.total_cooling_seconds)) }
+                          title="Click to view model cooling details" 
+                          onclick=(format!("showModelCoolings('{}', '{}')", k.id, k.key)) { (format_cooling_time(k.total_cooling_seconds)) }
                 }
                 td class="p-4 text-sm text-slate-700 font-medium" { (format_used_time(k.created_at)) }
             }
@@ -650,7 +682,7 @@ fn build_copyable_key(key: &str) -> Markup {
     html! {
         div class="relative inline-block" {
             code class="px-3 py-2 bg-slate-200/80 border border-slate-300/70 rounded-lg text-sm font-mono text-slate-900 cursor-pointer hover:bg-slate-300/80 hover:border-slate-400/70 transition-all duration-200 inline-block truncate max-w-full group-hover:shadow-sm backdrop-blur-sm"
-                  onclick={"copyToClipboard('"(key)"', this)"}
+                  onclick=(format!("copyToClipboard('{}', this)", key))
                   title="Click to copy" { (key) }
             div class="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-emerald-700 text-white text-xs px-2 py-1 rounded opacity-0 pointer-events-none transition-opacity duration-300 whitespace-nowrap copy-tooltip backdrop-blur-sm" {
                 "Copied!"

@@ -18,31 +18,39 @@ function copyToClipboard(text, element) {
     });
 }
 
-function showModelCoolings(modelCoolingsJson, keyName) {
+async function showModelCoolings(keyId, keyName) {
     const modalKeyName = document.getElementById('modalKeyName');
     const modalTable = document.getElementById('modelCoolingsTable');
     const modal = document.getElementById('modelCoolingsModal');
-    
+
     modalKeyName.textContent = keyName;
-    
+    modalTable.innerHTML = '<p class=\"text-gray-600 text-center py-8\">Loading...</p>';
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+
     try {
-        const modelCoolings = JSON.parse(modelCoolingsJson);
+        const response = await fetch(`/api/keys/${keyId}/coolings`);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const keyData = await response.json();
+        const modelCoolings = keyData.model_coolings || {};
         const now = Date.now() / 1000;
-        
+
         if (Object.keys(modelCoolings).length === 0) {
             modalTable.innerHTML = '<p class=\"text-gray-600 text-center py-8\">No model cooling data available</p>';
         } else {
-            const rows = Object.entries(modelCoolings).map(([model, cooling]) => {
-                const isAvailable = cooling.end_at < now;
-                const remainingTime = isAvailable ? '-' : formatTime(cooling.end_at - now);
-                const totalTime = formatTime(cooling.total_seconds);
+            const rows = Object.entries(modelCoolings).map(([model, coolingEnd]) => {
+                const isAvailable = coolingEnd < now;
+                const remainingTime = isAvailable ? '-' : formatTime(coolingEnd - now);
+                // We don't have total_seconds from this endpoint, so we can't display it.
+                // You might need to adjust your API if this is required.
                 const statusClass = isAvailable ? 'text-green-600 bg-green-50' : 'text-red-600 bg-red-50';
                 const status = isAvailable ? 'available' : 'cooling';
-                
+
                 return `
                     <tr class=\"border-b border-gray-200\">
                         <td class=\"p-3 font-mono text-sm\">${model}</td>
-                        <td class=\"p-3 text-sm\">${totalTime}</td>
                         <td class=\"p-3 text-sm\">${remainingTime}</td>
                         <td class=\"p-3\">
                             <span class=\"px-2 py-1 rounded-lg text-xs font-medium ${statusClass}\">${status}</span>
@@ -50,13 +58,12 @@ function showModelCoolings(modelCoolingsJson, keyName) {
                     </tr>
                 `;
             }).join('');
-            
+
             modalTable.innerHTML = `
                 <table class=\"w-full\">
                     <thead>
                         <tr class=\"border-b border-gray-200 bg-gray-50\">
                             <th class=\"p-3 text-left font-semibold text-gray-900\">Model</th>
-                            <th class=\"p-3 text-left font-semibold text-gray-900\">Total Cooling Time</th>
                             <th class=\"p-3 text-left font-semibold text-gray-900\">Remaining Time</th>
                             <th class=\"p-3 text-left font-semibold text-gray-900\">Status</th>
                         </tr>
@@ -68,11 +75,9 @@ function showModelCoolings(modelCoolingsJson, keyName) {
             `;
         }
     } catch (e) {
-        modalTable.innerHTML = '<p class=\"text-red-600 text-center py-8\">Error parsing model cooling data</p>';
+        console.error('Error fetching or parsing model cooling data:', e);
+        modalTable.innerHTML = `<p class=\"text-red-600 text-center py-8\">Error: ${e.message}</p>`;
     }
-    
-    modal.classList.remove('hidden');
-    modal.classList.add('flex');
 }
 
 function closeModal(event) {

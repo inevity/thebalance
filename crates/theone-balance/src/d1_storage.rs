@@ -114,6 +114,15 @@ pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<ApiKey>> {
+    let statement = query!(db, "SELECT * FROM keys WHERE id = ?1", key_id)?;
+    let result = statement.first::<ApiKeyDbRow>(None).await?;
+    match result {
+        Some(row) => Ok(Some(row.try_into().unwrap())),
+        None => Ok(None),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ApiKeyDbRow {
     id: String,
