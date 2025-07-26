@@ -14,12 +14,12 @@ pub mod state {
 
 #[cfg(feature = "raw_d1")]
 pub mod d1_storage;
+#[cfg(feature = "do_d1")]
+pub mod state_do_d1_broken;
 #[cfg(feature = "do_kv")]
 pub mod state_do_kv;
 #[cfg(feature = "do_sqlite")]
 pub mod state_do_sqlite;
-#[cfg(feature = "do_d1")]
-pub mod state_do_d1_broken;
 
 use tower_service::Service;
 use worker::send::SendWrapper;
@@ -28,7 +28,12 @@ use worker::*;
 #[derive(Clone)]
 pub struct AppState {
     pub env: SendWrapper<Env>,
+    // pub env: String,
 }
+// #[derive(Clone, Debug)]
+// pub struct DummyAppState {
+//     pub dummy: String,
+// }
 
 #[event(fetch)]
 pub async fn fetch(

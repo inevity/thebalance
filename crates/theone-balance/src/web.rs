@@ -105,15 +105,76 @@ pub struct KeysListParams {
     sort_order: Option<String>,
 }
 
-#[axum::debug_handler]
+// #[axum::debug_handler]
+#[worker::send]
 pub async fn get_keys_list_page_handler(
-    State(state): State<AppState>,
+    State(state): State<crate::AppState>,
     Path(provider): Path<String>,
     Query(params): Query<KeysListParams>,
-) -> impl IntoResponse {
-    // Your handler implementation
-    (StatusCode::OK, "Handler working!")
+    _layout: PageLayout,
+) -> Response {
+    let status: &str = params.status.as_deref().unwrap_or("active");
+    let q: &str = params.q.as_deref().unwrap_or("");
+    let page = params.page.unwrap_or(1);
+    let sort_by: &str = params.sort_by.as_deref().unwrap_or("");
+    let sort_order: &str = params.sort_order.as_deref().unwrap_or("desc");
+    let db = match state.env.d1("DB") {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+                .into_response()
+        }
+    };
+
+    let (keys, total) =
+        // match d1_storage::list_keys(&db, &provider, status, q, page, 20, sort_by, sort_order).await
+        match d1_storage::list_keys(&db, provider.as_str(), &status, &q, page, 20, sort_by, sort_order).await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to list keys: {}", e),
+                )
+                    .into_response()
+            }
+        };
+
+    let content = keys_list_page(
+        // &provider, status, q, keys, total, page, 20, sort_by, sort_order,
+        provider.as_str(),
+        status,
+        q,
+        keys,
+        total,
+        page,
+        20,
+        sort_by,
+        sort_order,
+    );
+    //(
+    //    StatusCode::OK,
+    //    format!(
+    //        "Provider: {}, Status: {}, Q: {}, Page: {}",
+    //        provider, status, q, page
+    //    ),
+    //)
+    // .into_response()
+    (StatusCode::OK, page_layout(content)).into_response()
 }
+
+// #[axum::debug_handler]
+// pub async fn get_keys_list_page_handler(
+//     State(state): State<AppState>,
+//     Path(provider): Path<String>,
+//     Query(params): Query<KeysListParams>,
+// ) -> impl IntoResponse {
+//     // Your handler implementation
+//     // (StatusCode::OK, "Handler working!")
+// }
 
 //#[axum::debug_handler]
 //pub async fn get_keys_list_page_handler(

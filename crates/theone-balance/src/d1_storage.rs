@@ -2,12 +2,13 @@
 //! It is only compiled when the `raw_d1` feature is enabled.
 
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
-use serde::{Deserialize, Serialize};
-use worker::{query, D1Database, Env, Method, Request, Response, Result};
-use uuid::Uuid;
 use js_sys::Date;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
+use worker::{query, D1Database, Env, Method, Request, Response, Result};
 
+#[worker::send]
 pub async fn list_keys(
     db: &D1Database,
     provider: &str,
@@ -43,7 +44,10 @@ pub async fn list_keys(
 
     let results = statement.all().await?;
     let db_rows = results.results::<ApiKeyDbRow>()?;
-    let api_keys: Vec<ApiKey> = db_rows.into_iter().filter_map(|r| r.try_into().ok()).collect();
+    let api_keys: Vec<ApiKey> = db_rows
+        .into_iter()
+        .filter_map(|r| r.try_into().ok())
+        .collect();
 
     // For simplicity, we'll get the total count in a separate query.
     // In a production app, you might use a more efficient way to get total count.
@@ -53,7 +57,6 @@ pub async fn list_keys(
 
     Ok((api_keys, total))
 }
-
 
 // This struct represents the data as it is stored in the SQLite database.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,7 +78,11 @@ impl TryFrom<ApiKeyDbRow> for ApiKey {
             id: row.id,
             key: row.key,
             provider: row.provider,
-            status: if row.status == "active" { ApiKeyStatus::Active } else { ApiKeyStatus::Blocked },
+            status: if row.status == "active" {
+                ApiKeyStatus::Active
+            } else {
+                ApiKeyStatus::Blocked
+            },
             model_coolings: serde_json::from_str(&row.model_coolings).unwrap_or_default(),
             total_cooling_seconds: row.total_cooling_seconds as u64,
             created_at: row.created_at as u64,
@@ -105,7 +112,7 @@ struct SetCooldownRequest {
 pub async fn handle_request(mut req: Request, env: &Env) -> Result<Response> {
     let db = env.d1("DB")?;
     let path = req.path();
-    
+
     match (req.method(), path.as_str()) {
         (Method::Post, "/keys") => add_key(&mut req, &db).await,
         (Method::Get, "/keys") => get_all_keys(&db).await,
@@ -118,13 +125,17 @@ pub async fn handle_request(mut req: Request, env: &Env) -> Result<Response> {
             Response::from_json(&active_keys)
         }
         (Method::Put, path) if path.ends_with("/status") => {
-            let id = path.trim_start_matches("/keys/").trim_end_matches("/status");
+            let id = path
+                .trim_start_matches("/keys/")
+                .trim_end_matches("/status");
             let update_req: UpdateStatusRequest = req.json().await?;
             update_status(&db, id, update_req.status).await?;
             Response::ok("Status updated")
         }
         (Method::Post, path) if path.ends_with("/cooldown") => {
-            let id = path.trim_start_matches("/keys/").trim_end_matches("/cooldown");
+            let id = path
+                .trim_start_matches("/keys/")
+                .trim_end_matches("/cooldown");
             let cooldown_req: SetCooldownRequest = req.json().await?;
             set_cooldown(&db, id, &cooldown_req.model, cooldown_req.duration_secs).await?;
             Response::ok("Cooldown set")
@@ -145,53 +156,100 @@ async fn add_key(req: &mut Request, db: &D1Database) -> Result<Response> {
         created_at: 0,
         updated_at: 0,
     };
-    query!(db, "INSERT INTO keys (id, key, provider, model_coolings) VALUES (?, ?, ?, ?)", &new_key.id, &new_key.key, &new_key.provider, "{}")?.run().await?;
+    query!(
+        db,
+        "INSERT INTO keys (id, key, provider, model_coolings) VALUES (?, ?, ?, ?)",
+        &new_key.id,
+        &new_key.key,
+        &new_key.provider,
+        "{}"
+    )?
+    .run()
+    .await?;
     Response::from_json(&new_key)
 }
 
 async fn get_all_keys(db: &D1Database) -> Result<Response> {
     let results = query!(db, "SELECT * FROM keys").all().await?;
     let db_rows = results.results::<ApiKeyDbRow>()?;
-    let api_keys: Vec<ApiKey> = db_rows.into_iter().filter_map(|r| r.try_into().ok()).collect();
+    let api_keys: Vec<ApiKey> = db_rows
+        .into_iter()
+        .filter_map(|r| r.try_into().ok())
+        .collect();
     Response::from_json(&api_keys)
 }
 
 pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiKey>> {
-    if provider.is_empty() { 
-        return Err(worker::Error::from("Provider not specified")); 
+    if provider.is_empty() {
+        return Err(worker::Error::from("Provider not specified"));
     }
-    
-    let statement = query!(db, "SELECT * FROM keys WHERE provider = ?1 AND status = 'active'", provider)?;
+
+    let statement = query!(
+        db,
+        "SELECT * FROM keys WHERE provider = ?1 AND status = 'active'",
+        provider
+    )?;
     let results = statement.all().await?;
     let db_rows = results.results::<ApiKeyDbRow>()?;
 
     let now = (Date::now() / 1000.0) as u64;
-    let active_keys: Vec<ApiKey> = db_rows.into_iter()
+    let active_keys: Vec<ApiKey> = db_rows
+        .into_iter()
         .filter_map(|row| row.try_into().ok())
-        .filter(|k: &ApiKey| k.model_coolings.values().all(|&cooldown_end| now >= cooldown_end))
+        .filter(|k: &ApiKey| {
+            k.model_coolings
+                .values()
+                .all(|&cooldown_end| now >= cooldown_end)
+        })
         .collect();
-    
+
     Ok(active_keys)
 }
 
 pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> Result<()> {
-    let status_str = if status == ApiKeyStatus::Active { "active" } else { "blocked" };
-    query!(db, "UPDATE keys SET status = ?1, updated_at = strftime('%s', 'now') WHERE id = ?2", status_str, id)?.run().await?;
+    let status_str = if status == ApiKeyStatus::Active {
+        "active"
+    } else {
+        "blocked"
+    };
+    query!(
+        db,
+        "UPDATE keys SET status = ?1, updated_at = strftime('%s', 'now') WHERE id = ?2",
+        status_str,
+        id
+    )?
+    .run()
+    .await?;
     Ok(())
 }
 
-pub async fn set_cooldown(db: &D1Database, id: &str, model: &str, duration_secs: u64) -> Result<()> {
-    if let Some(row) = query!(db, "SELECT * FROM keys WHERE id = ?1", id)?.first::<ApiKeyDbRow>(None).await? {
-        let mut key: ApiKey = row.try_into().map_err(|_| worker::Error::Json(("Failed to parse model_coolings".to_string(), 500)))?;
+pub async fn set_cooldown(
+    db: &D1Database,
+    id: &str,
+    model: &str,
+    duration_secs: u64,
+) -> Result<()> {
+    if let Some(row) = query!(db, "SELECT * FROM keys WHERE id = ?1", id)?
+        .first::<ApiKeyDbRow>(None)
+        .await?
+    {
+        let mut key: ApiKey = row.try_into().map_err(|_| {
+            worker::Error::Json(("Failed to parse model_coolings".to_string(), 500))
+        })?;
         let now = (Date::now() / 1000.0) as u64;
         let cooldown_end = now + duration_secs;
         key.model_coolings.insert(model.to_string(), cooldown_end);
-        
+
         let coolings_json = serde_json::to_string(&key.model_coolings)?;
-        query!(db, "UPDATE keys SET model_coolings = ?1, updated_at = strftime('%s', 'now') WHERE id = ?2", coolings_json, id)?.run().await?;
+        query!(
+            db,
+            "UPDATE keys SET model_coolings = ?1, updated_at = strftime('%s', 'now') WHERE id = ?2",
+            coolings_json,
+            id
+        )?
+        .run()
+        .await?;
     }
     // If key is not found, we just ignore. It might have been deleted.
     Ok(())
 }
-
-
