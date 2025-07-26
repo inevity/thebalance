@@ -58,7 +58,57 @@ pub async fn list_keys(
     Ok((api_keys, total))
 }
 
-// This struct represents the data as it is stored in the SQLite database.
+pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result<()> {
+    let keys: Vec<String> = keys_str
+        .split(|c| c == '\n' || c == ',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let now = (Date::now() / 1000.0) as u64;
+    let mut statements = Vec::new();
+
+    for key in keys {
+        let statement = query!(
+            db,
+            "INSERT INTO keys (id, key, provider, status, model_coolings, total_cooling_seconds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            Uuid::new_v4().to_string(),
+            key,
+            provider,
+            "active",
+            "{}",
+            0,
+            now,
+            now
+        )?;
+        statements.push(statement);
+    }
+    
+    db.batch(statements).await?;
+
+    Ok(())
+}
+
+pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut statements = Vec::new();
+    for id in ids {
+        let statement = query!(db, "DELETE FROM keys WHERE id = ?1", id)?;
+        statements.push(statement);
+    }
+
+    db.batch(statements).await?;
+
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ApiKeyDbRow {
     id: String,

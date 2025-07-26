@@ -90,8 +90,8 @@ pub async fn post_login_handler(
 // endregion: --- Login Handlers
 
 // region: --- Provider Page Handlers
-pub async fn get_providers_page_handler() -> impl IntoResponse {
-    page_layout(providers_page()).into_response()
+pub async fn get_providers_page_handler(_layout: PageLayout) -> Markup {
+    page_layout(providers_page())
 }
 // endregion: --- Provider Page Handlers
 
@@ -166,6 +166,14 @@ pub async fn get_keys_list_page_handler(
     (StatusCode::OK, page_layout(content)).into_response()
 }
 
+#[derive(Deserialize, Debug)]
+pub struct KeysListForm {
+    action: String,
+    keys: Option<String>,
+    #[serde(default)]
+    key_id: Vec<String>,
+}
+
 // #[axum::debug_handler]
 // pub async fn get_keys_list_page_handler(
 //     State(state): State<AppState>,
@@ -220,9 +228,44 @@ pub async fn get_keys_list_page_handler(
 //    (StatusCode::OK, page_layout(content)).into_response()
 //}
 
-pub async fn post_keys_list_handler() -> impl IntoResponse {
-    // TODO: Implement this handler
-    (StatusCode::NOT_IMPLEMENTED, "Not Implemented")
+#[worker::send]
+pub async fn post_keys_list_handler(
+    State(state): State<crate::AppState>,
+    Path(provider): Path<String>,
+    Form(form): Form<KeysListForm>,
+) -> impl IntoResponse {
+    if form.action == "add" {
+        if let Some(keys_str) = form.keys {
+            let db = state.env.d1("DB").unwrap();
+            match d1_storage::add_keys(&db, &provider, &keys_str).await {
+                Ok(_) => (), // All good
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to add keys: {}", e),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    } else if form.action == "delete" {
+        if !form.key_id.is_empty() {
+            let db = state.env.d1("DB").unwrap();
+            match d1_storage::delete_keys(&db, form.key_id).await {
+                Ok(_) => (), // All good
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to delete keys: {}", e),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+
+    // Redirect back to the keys list page
+    Redirect::to(&format!("/keys/{}", provider)).into_response()
 }
 
 //#[axum::debug_handler]
