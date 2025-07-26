@@ -7,20 +7,18 @@
     "pre-deploy": "node pre-deploy.mjs",
     "pre-dev": "node pre-dev.mjs",
     "dev": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --port 8087",
-    "migrate": "drizzle-kit generate && wrangler d1 migrations apply one-balance -c wrangler.jsonc",
-    "migrate:remote": "drizzle-kit generate && wrangler d1 migrations apply one-balance --remote",
+    "migrate": "geni up",
+    "migrate:new": "geni new",
+    "migrate:remote": "geni up",
     "deploy": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy",
     "deploy:dry-run": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy --dry-run",
     "deploy:reset": "pnpm deploy && wrangler d1 execute one-balance --remote --command \"UPDATE keys SET status = 'active',model_coolings = '{}', total_cooling_seconds = 0;\""
   },
   "devDependencies": {
     "wrangler": "4.26.0",
-    "drizzle-kit": "^0.31.2",
     "jsonc-parser": "^3.2.0"
   },
-  "dependencies": {
-      "drizzle-orm": "^0.44.2"
-  },
+  "dependencies": {},
   "packageManager": "pnpm@10.13.1+sha512.37ebf1a5c7a30d5fabe0c5df44ee8da4c965ca0c5af3dbab28c3a1681b70a256218d05c81c9c0dcf767ef6b8551eb5b960042b9ed4300c59242336377e01cfad"
 }
 

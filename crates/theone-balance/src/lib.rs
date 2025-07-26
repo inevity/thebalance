@@ -1,5 +1,6 @@
 // Declare all our modules. The feature flags ensure only the code
 // for the active strategy is included in the final binary.
+pub mod dbmodels;
 pub mod error_handling;
 pub mod gcp;
 pub mod handlers;
