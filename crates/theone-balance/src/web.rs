@@ -2,11 +2,11 @@
 
 use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
 use axum::{
-    extract::{Form, FromRef, FromRequestParts, Path, Query, State},
+    extract::{Form, FromRef, FromRequest, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::get,
-    Router,
+    RequestPartsExt, Router,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use phf::phf_map;
@@ -90,8 +90,8 @@ pub async fn post_login_handler(
 // endregion: --- Login Handlers
 
 // region: --- Provider Page Handlers
-pub async fn get_providers_page_handler(_layout: PageLayout) -> Markup {
-    page_layout(providers_page())
+pub async fn get_providers_page_handler() -> impl IntoResponse {
+    page_layout(providers_page()).into_response()
 }
 // endregion: --- Provider Page Handlers
 
@@ -106,50 +106,58 @@ pub struct KeysListParams {
 }
 
 #[axum::debug_handler]
-
 pub async fn get_keys_list_page_handler(
-    _layout: PageLayout,
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Query(params): Query<KeysListParams>,
 ) -> impl IntoResponse {
-    let status = params.status.as_deref().unwrap_or("active");
-    let q = params.q.as_deref().unwrap_or("");
-    let page = params.page.unwrap_or(1);
-    let sort_by = params.sort_by.as_deref().unwrap_or("");
-    let sort_order = params.sort_order.as_deref().unwrap_or("desc");
-
-    let db = match state.env.d1("DB") {
-        Ok(db) => db,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-                .into_response()
-        }
-    };
-
-    let (keys, total) =
-        match d1_storage::list_keys(&db, &provider, status, q, page, 20, sort_by, sort_order).await
-        {
-            Ok(data) => data,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to list keys: {}", e),
-                )
-                    .into_response()
-            }
-        };
-
-    let content = keys_list_page(
-        &provider, status, q, keys, total, page, 20, // pageSize
-        sort_by, sort_order,
-    );
-
-    (StatusCode::OK, page_layout(content)).into_response()
+    // Your handler implementation
+    (StatusCode::OK, "Handler working!")
 }
+
+//#[axum::debug_handler]
+//pub async fn get_keys_list_page_handler(
+//    State(state): State<AppState>,
+//    Path(provider): Path<String>,
+//    Query(params): Query<KeysListParams>,
+//) -> impl IntoResponse {
+//    let status = params.status.as_deref().unwrap_or("active");
+//    let q = params.q.as_deref().unwrap_or("");
+//    let page = params.page.unwrap_or(1);
+//    let sort_by = params.sort_by.as_deref().unwrap_or("");
+//    let sort_order = params.sort_order.as_deref().unwrap_or("desc");
+//
+//    let db = match state.env.d1("DB") {
+//        Ok(db) => db,
+//        Err(e) => {
+//            return (
+//                StatusCode::INTERNAL_SERVER_ERROR,
+//                format!("Database error: {}", e),
+//            )
+//                .into_response()
+//        }
+//    };
+//
+//    let (keys, total) =
+//        match d1_storage::list_keys(&db, &provider, status, q, page, 20, sort_by, sort_order).await
+//        {
+//            Ok(data) => data,
+//            Err(e) => {
+//                return (
+//                    StatusCode::INTERNAL_SERVER_ERROR,
+//                    format!("Failed to list keys: {}", e),
+//                )
+//                    .into_response()
+//            }
+//        };
+//
+//    let content = keys_list_page(
+//        &provider, status, q, keys, total, page, 20, // pageSize
+//        sort_by, sort_order,
+//    );
+//
+//    (StatusCode::OK, page_layout(content)).into_response()
+//}
 
 pub async fn post_keys_list_handler() -> impl IntoResponse {
     // TODO: Implement this handler
@@ -904,6 +912,57 @@ where
         Err(Redirect::to("/login").into_response())
     }
 }
+//impl<S, B> FromRequest<S, B> for PageLayout
+//where
+//    B: Send,
+//    S: Send + Sync,
+//    AppState: FromRef<S>,
+//{
+//    type Rejection = Response;
+//
+//    async fn from_request(req: RequestParts<S, B>) -> Result<Self, Self::Rejection> {
+//        // Delegate to your FromRequestParts impl to extract from parts
+//        Self::from_request_parts(req.parts(), req.extensions()).await
+//    }
+//}
+
+//use std::{future::Future, pin::Pin};
+//impl<S> FromRequestParts<S> for PageLayout
+//where
+//    S: Send + Sync + 'static,
+//    AppState: FromRef<S>,
+//{
+//    type Rejection = Response;
+//
+//    fn from_request_parts(
+//        parts: &mut Parts,
+//        state: &S,
+//    ) -> Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send>> {
+//        let state = AppState::from_ref(state);
+//        let mut parts = std::mem::take(parts); // move out to avoid borrow issues
+//
+//        Box::pin(async move {
+//            let cookies = Cookies::from_request_parts(&mut parts, &state)
+//                .await
+//                .map_err(|rejection| {
+//                    (
+//                        StatusCode::INTERNAL_SERVER_ERROR,
+//                        format!("Cookie error: {} {}", rejection.0, rejection.1),
+//                    )
+//                        .into_response()
+//                })?;
+//
+//            if let Some(cookie) = cookies.get("auth_key") {
+//                let auth_key = cookie.value().to_string();
+//                if util::is_valid_auth_key(&auth_key, &state.env) {
+//                    return Ok(PageLayout);
+//                }
+//            }
+//
+//            Err(Redirect::to("/login").into_response())
+//        })
+//    }
+//}
 //impl<S> FromRequestParts<S> for PageLayout
 //where
 //    S: Send + Sync,
