@@ -14,7 +14,6 @@ pub struct Key {
     #[key]
     #[auto]
     pub id: Id<Self>,
-    #[unique]
     pub key: String,
     #[index]
     pub provider: String,
@@ -23,9 +22,10 @@ pub struct Key {
     pub total_cooling_seconds: i64,
     #[index]
     pub status: String,
+    #[index]
     pub created_at: i64,
+    #[index]
     pub updated_at: i64,
-    // created_at and updated_at are handled by the database
 }
 
 impl Key {

@@ -1,4 +1,4 @@
-CREATE TABLE keys (
+CREATE TABLE IF NOT EXISTS keys (
     id TEXT PRIMARY KEY,
     key TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -9,6 +9,6 @@ CREATE TABLE keys (
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
-CREATE UNIQUE INDEX provider_key_unq_idx ON keys(provider, key);
-CREATE INDEX provider_status_created_at_idx ON keys(provider, status, created_at);
-CREATE INDEX total_cooling_seconds_idx ON keys(total_cooling_seconds);
+CREATE UNIQUE INDEX IF NOT EXISTS provider_key_unq_idx ON keys(provider, key);
+CREATE INDEX IF NOT EXISTS provider_status_created_at_idx ON keys(provider, status, created_at);
+CREATE INDEX IF NOT EXISTS total_cooling_seconds_idx ON keys(total_cooling_seconds);
