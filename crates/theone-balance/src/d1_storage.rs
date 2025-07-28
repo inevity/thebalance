@@ -6,31 +6,52 @@ use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
 use std::collections::HashMap;
-use toasty::stmt::{OrderBy, Value};
+use toasty::stmt::{Value, Expr as ToastyExpr};
 use toasty_sql::Serializer as sqlser;
+use toasty_core::stmt::{Expr as CoreExpr, ExprLike, Limit, Offset};
 use uuid::Uuid;
 use worker::{D1Database, D1Type, Result};
 
-// FIXME: This is a temporary workaround.
-// The `toasty-sql` Serializer requires a `toasty_core::schema::Schema`. In a full `toasty::Db`
-// application, this is built automatically when the Db is initialized. Because we are using
-// Toasty only as a query builder, we don't have this schema object available.
-// This function constructs a minimal schema manually to satisfy the serializer.
-// A proper solution would involve either generating this schema at compile time or
-// finding a way to get it from the D1 database itself.
-fn get_schema() -> toasty_core::schema::Schema {
-    let mut schema = toasty_core::schema::Schema::new();
-    let mut key_table = toasty_core::schema::db::Table::new("keys");
-    key_table.add_column(toasty_core::schema::db::Column::new("id", toasty_core::stmt::Type::Id));
-    key_table.add_column(toasty_core::schema::db::Column::new("key", toasty_core::stmt::Type::String));
-    key_table.add_column(toasty_core::schema::db::Column::new("provider", toasty_core::stmt::Type::String));
-    key_table.add_column(toasty_core::schema::db::Column::new("model_coolings", toasty_core::stmt::Type::String));
-    key_table.add_column(toasty_core::schema::db::Column::new("total_cooling_seconds", toasty_core::stmt::Type::I64));
-    key_table.add_column(toasty_core::schema::db::Column::new("status", toasty_core::stmt::Type::String));
-    key_table.add_column(toasty_core::schema::db::Column::new("created_at", toasty_core::stmt::Type::I64));
-    key_table.add_column(toasty_core::schema::db::Column::new("updated_at", toasty_core::stmt::Type::I64));
-    schema.add_table(key_table);
-    schema
+// Create a static schema just for SQL generation
+static TOASTY_SCHEMA: once_cell::sync::Lazy<toasty_core::schema::Schema> = once_cell::sync::Lazy::new(|| {
+    let mut builder = toasty_core::schema::Builder::default();
+    // We don't need to actually build the schema properly since we're just using it for SQL generation
+    // The toasty-sql serializer will work with an empty schema for basic operations
+    builder.build(
+        toasty_core::schema::app::Schema::from_macro(&[DbKey::schema()]).expect("Failed to build app schema"),
+        toasty_core::driver::Capability::default()
+    ).expect("Failed to build schema")
+});
+
+/// Create a LIKE expression for string matching
+fn create_like_expr(field_expr: toasty::stmt::Path<String>, pattern: String) -> toasty::stmt::Expr<bool> {
+    // Create the core LIKE expression using the same pattern as eq()
+    let pattern_expr = CoreExpr::Value(toasty_core::stmt::Value::String(pattern));
+    let core_like_expr = CoreExpr::like(
+        field_expr.untyped.into_stmt(),
+        pattern_expr
+    );
+    
+    // Wrap it in the Toasty Expr
+    ToastyExpr::from_untyped(core_like_expr)
+}
+
+/// Convert a DbKey to an ApiKey
+fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
+    ApiKey {
+        id: db_key.id.to_string(),
+        key: db_key.key,
+        provider: db_key.provider,
+        status: if db_key.status == "active" {
+            ApiKeyStatus::Active
+        } else {
+            ApiKeyStatus::Blocked
+        },
+        model_coolings: serde_json::from_str(&db_key.model_coolings).unwrap_or_default(),
+        total_cooling_seconds: db_key.total_cooling_seconds as u64,
+        created_at: db_key.created_at as u64,
+        updated_at: db_key.updated_at as u64,
+    }
 }
 
 
@@ -45,47 +66,65 @@ pub async fn list_keys(
     sort_by: &str,
     sort_order: &str,
 ) -> Result<(Vec<ApiKey>, i32)> {
-    let mut query = DbKey::filter_by_provider(provider).filter(DbKey::status().eq(status));
+    let mut query = DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
 
     if !q.is_empty() {
-        query = query.filter(DbKey::key().like(format!("%{}%", q)));
+        let like_expr = create_like_expr(DbKey::FIELDS.key.clone(), format!("%{}%", q));
+        query = query.filter(like_expr);
     }
 
-    let sort_column = match sort_by {
-        "createdAt" => "created_at",
-        "totalCoolingSeconds" => "total_cooling_seconds",
-        _ => "updated_at",
+    let order_expr = match sort_by {
+        "createdAt" => {
+            if sort_order == "asc" {
+                DbKey::FIELDS.created_at.asc()
+            } else {
+                DbKey::FIELDS.created_at.desc()
+            }
+        },
+        "totalCoolingSeconds" => {
+            if sort_order == "asc" {
+                DbKey::FIELDS.total_cooling_seconds.asc()
+            } else {
+                DbKey::FIELDS.total_cooling_seconds.desc()
+            }
+        },
+        _ => {
+            if sort_order == "asc" {
+                DbKey::FIELDS.updated_at.asc()
+            } else {
+                DbKey::FIELDS.updated_at.desc()
+            }
+        },
     };
-
-    let order = if sort_order == "asc" {
-        OrderBy::Asc
-    } else {
-        OrderBy::Desc
-    };
-    query.order_by(sort_column, order);
+    query.order_by(order_expr);
 
     let offset = (page - 1) * page_size;
-    query.limit(page_size).offset(offset);
+    // Set limit and offset directly on the untyped query
+    query.untyped.limit = Some(Limit {
+        limit: CoreExpr::Value(toasty_core::stmt::Value::from(page_size as i64)),
+        offset: Some(Offset::Count(CoreExpr::Value(toasty_core::stmt::Value::from(offset as i64)))),
+    });
 
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     let stmt = unbound_stmt.bind_refs(&d1_params)?;
     let results: Vec<DbKey> = stmt.all().await?.results()?;
 
-    let mut count_query = DbKey::filter_by_provider(provider).filter(DbKey::status().eq(status));
+    let mut count_query = DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
     if !q.is_empty() {
-        count_query = count_query.filter(DbKey::key().like(format!("%{}%", q)));
+        let like_expr = create_like_expr(DbKey::FIELDS.key.clone(), format!("%{}%", q));
+        count_query = count_query.filter(like_expr);
     }
 
+    let count_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut count_params = vec![];
-    let count_sql = serializer.serialize_count(&count_query.untyped.into(), &mut count_params);
+    let count_sql = count_serializer.serialize_count(&count_query.into(), &mut count_params);
     let d1_count_params: Vec<_> = count_params.iter().map(to_d1_type).collect();
-    let unbound_count_stmt = db.prepare(&count_sql)?;
+    let unbound_count_stmt = db.prepare(&count_sql);
     let total: i32 = unbound_count_stmt
         .bind_refs(&d1_count_params)?
         .first(Some("count"))
@@ -94,20 +133,7 @@ pub async fn list_keys(
 
     let api_keys: Vec<ApiKey> = results
         .into_iter()
-        .map(|db_key| ApiKey {
-            id: db_key.id.to_string(),
-            key: db_key.key,
-            provider: db_key.provider,
-            status: if db_key.status == "active" {
-                ApiKeyStatus::Active
-            } else {
-                ApiKeyStatus::Blocked
-            },
-            model_coolings: serde_json::from_str(&db_key.model_coolings).unwrap_or_default(),
-            total_cooling_seconds: db_key.total_cooling_seconds as u64,
-            created_at: db_key.created_at as u64,
-            updated_at: db_key.updated_at as u64,
-        })
+        .map(db_key_to_api_key)
         .collect();
 
     Ok((api_keys, total))
@@ -139,12 +165,11 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result
                 .updated_at(now),
         );
     }
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&batch.untyped.into(), &mut params);
+    let sql = serializer.serialize(&batch.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
 
 
@@ -156,58 +181,45 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
         return Ok(());
     }
     let id_strs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-    let query = DbKey::filter_by_id_batch(id_strs).delete();
-
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    
+    // For batch delete, we need to generate individual DELETE statements
+    // or use a WHERE IN clause. Let's use WHERE IN for efficiency.
+    let query = DbKey::filter(DbKey::FIELDS.id.is_in(id_strs.iter().map(|s| s.to_string()).collect()));
+    
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.delete().into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
     Ok(())
 }
 
 pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
-    let query = DbKey::filter_by_provider(provider).filter(DbKey::status().eq("blocked")).delete();
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let query = DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq("blocked"));
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.delete().into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
     Ok(())
 }
 
 pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<ApiKey>> {
-    let query = DbKey::filter_by_id(key_id);
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let query = DbKey::filter(DbKey::FIELDS.id.eq(key_id));
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     let result: Option<DbKey> = unbound_stmt.bind_refs(&d1_params)?.first(None).await?;
 
     match result {
-        Some(db_key) => Ok(Some(ApiKey {
-            id: db_key.id.to_string(),
-            key: db_key.key,
-            provider: db_key.provider,
-            status: if db_key.status == "active" {
-                ApiKeyStatus::Active
-            } else {
-                ApiKeyStatus::Blocked
-            },
-            model_coolings: serde_json::from_str(&db_key.model_coolings).unwrap_or_default(),
-            total_cooling_seconds: db_key.total_cooling_seconds as u64,
-            created_at: db_key.created_at as u64,
-            updated_at: db_key.updated_at as u64,
-        })),
+        Some(db_key) => Ok(Some(db_key_to_api_key(db_key))),
         None => Ok(None),
     }
 }
@@ -217,38 +229,24 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
         return Err(worker::Error::from("Provider not specified"));
     }
 
-    let query = DbKey::filter_by_provider(provider).filter(DbKey::status().eq("active"));
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let query = DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq("active"));
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     let db_keys: Vec<DbKey> = unbound_stmt.bind_refs(&d1_params)?.all().await?.results()?;
 
     let now = (Date::now() / 1000.0) as u64;
 
     let active_keys: Vec<ApiKey> = db_keys
         .into_iter()
-        .map(|db_key| ApiKey {
-            id: db_key.id.to_string(),
-            key: db_key.key,
-            provider: db_key.provider,
-            status: if db_key.status == "active" {
-                ApiKeyStatus::Active
-            } else {
-                ApiKeyStatus::Blocked
-            },
-            model_coolings: serde_json::from_str(&db_key.model_coolings).unwrap_or_default(),
-            total_cooling_seconds: db_key.total_cooling_seconds as u64,
-            created_at: db_key.created_at as u64,
-            updated_at: db_key.updated_at as u64,
-        })
+        .map(db_key_to_api_key)
         .filter(|k: &ApiKey| {
             k.model_coolings
                 .values()
-                .all(|&cooldown_end| now >= *cooldown_end as u64)
+                .all(|cooldown_end| now >= *cooldown_end as u64)
         })
         .collect();
 
@@ -261,17 +259,16 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> R
     } else {
         "blocked"
     };
-    let query = DbKey::filter_by_id(id)
+    let query = DbKey::filter(DbKey::FIELDS.id.eq(id))
         .update()
-        .status(status_str)
-        .updated_at((Date::now() / 1000.0) as i64);
+        .set(DbKey::FIELDS.status, status_str)
+        .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
 
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.untyped.into(), &mut params);
+    let sql = serializer.serialize(&query.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-    let unbound_stmt = db.prepare(&sql)?;
+    let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
     Ok(())
 }
@@ -282,13 +279,12 @@ pub async fn set_cooldown(
     model: &str,
     duration_secs: u64,
 ) -> Result<()> {
-    let get_query = DbKey::filter_by_id(id);
-    let schema = get_schema();
-    let serializer = sqlser::new(&schema);
+    let get_query = DbKey::filter(DbKey::FIELDS.id.eq(id));
+    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut get_params = vec![];
-    let get_sql = serializer.serialize(&get_query.untyped.into(), &mut get_params);
+    let get_sql = serializer.serialize(&get_query.into(), &mut get_params);
     let get_d1_params: Vec<_> = get_params.iter().map(to_d1_type).collect();
-    let get_unbound_stmt = db.prepare(&get_sql)?;
+    let get_unbound_stmt = db.prepare(&get_sql);
     let key_result: Option<DbKey> = get_unbound_stmt.bind_refs(&get_d1_params)?.first(None).await?;
 
     if let Some(key) = key_result {
@@ -299,14 +295,15 @@ pub async fn set_cooldown(
         coolings.insert(model.to_string(), cooldown_end as i64);
         let new_coolings_json = serde_json::to_string(&coolings).unwrap();
 
-        let update_query = DbKey::filter_by_id(id)
+        let update_query = DbKey::filter(DbKey::FIELDS.id.eq(id))
             .update()
-            .model_coolings(new_coolings_json)
-            .updated_at((Date::now() / 1000.0) as i64);
+            .set(DbKey::FIELDS.model_coolings, new_coolings_json)
+            .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
+        let update_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
         let mut update_params = vec![];
-        let update_sql = serializer.serialize(&update_query.untyped.into(), &mut update_params);
+        let update_sql = update_serializer.serialize(&update_query.into(), &mut update_params);
         let update_d1_params: Vec<_> = update_params.iter().map(to_d1_type).collect();
-        let update_unbound_stmt = db.prepare(&update_sql)?;
+        let update_unbound_stmt = db.prepare(&update_sql);
         update_unbound_stmt.bind_refs(&update_d1_params)?.run().await?;
     }
     Ok(())
@@ -318,7 +315,10 @@ fn to_d1_type<'a>(value: &'a Value) -> D1Type<'a> {
         Value::I32(v) => D1Type::Integer(*v),
         Value::I64(v) => D1Type::Integer(*v as i32), // D1 only supports i32
         Value::String(v) => D1Type::Text(v),
-        Value::Id(id) => D1Type::Text(&id.to_string()),
+        Value::Id(id) => {
+            let id_str = id.to_string();
+            D1Type::Text(&id_str)
+        },
         Value::Null => D1Type::Null,
         _ => D1Type::Null, // Simplification
     }

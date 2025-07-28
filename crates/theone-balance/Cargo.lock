@@ -681,6 +681,7 @@ dependencies = [
  "http-body",
  "js-sys",
  "maud",
+ "once_cell",
  "phf",
  "rand",
  "serde",

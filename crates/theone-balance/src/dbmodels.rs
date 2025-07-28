@@ -9,7 +9,7 @@ pub struct ModelCooling {
     pub end_at: i64,
 }
 
-#[derive(Debug, Model, Serialize, Deserialize, Clone)]
+#[derive(Debug, Model, Clone)]
 #[table = "keys"]
 pub struct Key {
     #[key]
