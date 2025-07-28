@@ -8,7 +8,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use toasty::schema::Schema;
-use toasty::stmt::Value;
+use toasty::stmt::{Statement as ToastyStatement, Value};
 use toasty_core::stmt::{Limit, Offset};
 use toasty_sql::Serializer as sqlser;
 use uuid::Uuid;
@@ -49,7 +49,7 @@ pub async fn list_keys(
     db: &D1Database,
     provider: &str,
     status: &str,
-    q: &str,
+    _q: &str,
     page: usize,
     page_size: usize,
     sort_by: &str,
@@ -58,11 +58,8 @@ pub async fn list_keys(
     let mut query =
         DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
 
-    // TODO: Add support for partial string matching when Toasty supports LIKE operations
-    // For now, we'll ignore the query parameter for filtering
-    // if !q.is_empty() {
-    //     // We need to implement LIKE functionality
-    // }
+    let mut count_query =
+        DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
 
     let order_expr = match sort_by {
         "createdAt" => {
@@ -89,41 +86,40 @@ pub async fn list_keys(
     };
     query.order_by(order_expr);
 
-    // Note: We're not setting limit/offset in Toasty because the generated query struct
-    // doesn't expose direct access to the underlying statement. We'll handle pagination
-    // at the SQL level if needed, or restructure the approach.
-    let _offset = (page - 1) * page_size;
+    // Apply pagination
+    let offset = (page - 1) * page_size;
+    let mut statement: ToastyStatement<DbKey> = query.into();
+    statement.untyped.limit(Limit {
+        limit: page_size as i64,
+        offset: Some(Offset { offset: offset as i64 }),
+    });
 
+    // Serialize the main query
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
+    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
+    let sql = serializer.serialize(&core_statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
-    let unbound_stmt = db.prepare(&sql);
-    let stmt = unbound_stmt.bind_refs(&d1_params)?;
-    let results: Vec<DbKey> = stmt.all().await?.results()?;
-
-    let mut count_query =
-        DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
-    // TODO: Add support for partial string matching when Toasty supports LIKE operations
-    // For now, we'll ignore the query parameter for filtering
-    // if !q.is_empty() {
-    //     // We need to implement LIKE functionality
-    // }
-
+    // Serialize the count query
     let count_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut count_params = vec![];
-    let count_sql = count_serializer.serialize_count(&count_query.untyped.into(), &mut count_params);
+    let count_statement: ToastyStatement<DbKey> = count_query.into();
+    let count_core_statement: toasty_core::stmt::Statement = count_statement.untyped.into();
+    let count_sql = count_serializer.serialize_count(&count_core_statement.into(), &mut count_params);
     let d1_count_params: Vec<_> = count_params.iter().map(to_d1_type).collect();
-    let unbound_count_stmt = db.prepare(&count_sql);
-    let total: i32 = unbound_count_stmt
-        .bind_refs(&d1_count_params)?
-        .first(Some("count"))
-        .await?
-        .unwrap_or(0);
 
-    let api_keys: Vec<ApiKey> = results.into_iter().map(db_key_to_api_key).collect();
+    // Execute the queries
+    let main_stmt = db.prepare(&sql).bind_refs(&d1_params)?;
+    let count_stmt = db.prepare(&count_sql).bind_refs(&d1_count_params)?;
+
+    let mut results = db.batch(vec![main_stmt, count_stmt]).await?;
+    let main_results = results.remove(0);
+    let count_results = results.remove(0);
+    let db_keys: Vec<DbKey> = main_results.results()?;
+    let total: i32 = count_results.results::<i32>()?.first().unwrap_or(Some(0)).unwrap_or(0);
+    
+    let api_keys: Vec<ApiKey> = db_keys.into_iter().map(db_key_to_api_key).collect();
 
     Ok((api_keys, total))
 }
@@ -205,8 +201,9 @@ pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<Ap
     let query = DbKey::filter(DbKey::FIELDS.id.eq(key_id));
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
+    let statement: toasty::stmt::Statement<DbKey> = query.into();
+    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
+    let sql = serializer.serialize(&core_statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -227,8 +224,9 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
         .filter(DbKey::FIELDS.status.eq("active"));
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
+    let statement: toasty::stmt::Statement<DbKey> = query.into();
+    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
+    let sql = serializer.serialize(&core_statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -262,8 +260,9 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> R
 
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
+    let statement: toasty::stmt::Statement<DbKey> = query.into();
+    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
+    let sql = serializer.serialize(&core_statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
     let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
