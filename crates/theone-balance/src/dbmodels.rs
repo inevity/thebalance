@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use toasty::stmt::Id;
+use toasty::Model;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelCooling {
@@ -8,8 +9,8 @@ pub struct ModelCooling {
     pub end_at: i64,
 }
 
-#[derive(Debug, toasty::Model, Serialize)]
-#[toasty(table = "keys")]
+#[derive(Debug, Model, Serialize, Deserialize, Clone)]
+#[table = "keys"]
 pub struct Key {
     #[key]
     #[auto]
