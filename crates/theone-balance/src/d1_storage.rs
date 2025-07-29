@@ -8,7 +8,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use toasty::schema::Schema;
-use toasty::stmt::{Statement as ToastyStatement, Value};
+use toasty::stmt::{IntoSelect, Value};
 use toasty_core::stmt::{Limit, Offset};
 use toasty_sql::Serializer as sqlser;
 use uuid::Uuid;
@@ -55,11 +55,10 @@ pub async fn list_keys(
     sort_by: &str,
     sort_order: &str,
 ) -> Result<(Vec<ApiKey>, i32)> {
-    let mut query =
-        DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
+    let query =
+        DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
 
-    let mut count_query =
-        DbKey::filter(DbKey::FIELDS.provider.eq(provider)).filter(DbKey::FIELDS.status.eq(status));
+    let count_query = DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
 
     let order_expr = match sort_by {
         "createdAt" => {
@@ -84,29 +83,28 @@ pub async fn list_keys(
             }
         }
     };
-    query.order_by(order_expr);
 
-    // Apply pagination
-    let offset = (page - 1) * page_size;
-    let mut statement: ToastyStatement<DbKey> = query.into();
-    statement.untyped.limit(Limit {
-        limit: page_size as i64,
-        offset: Some(Offset { offset: offset as i64 }),
-    });
+    let statement: toasty_core::stmt::Statement = query.order_by(order_expr).into_select().into();
 
     // Serialize the main query
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
-    let sql = serializer.serialize(&core_statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
+    let mut sql = serializer.serialize(&statement.into(), &mut params);
+
+    // Manually append LIMIT and OFFSET for pagination
+    sql.pop(); // Remove the trailing semicolon
+    sql.push_str(" LIMIT ? OFFSET ?");
+    
+    let offset = (page - 1) * page_size;
+    let mut d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
+    d1_params.push(D1Type::Integer(page_size as i32));
+    d1_params.push(D1Type::Integer(offset as i32));
 
     // Serialize the count query
     let count_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut count_params = vec![];
-    let count_statement: ToastyStatement<DbKey> = count_query.into();
-    let count_core_statement: toasty_core::stmt::Statement = count_statement.untyped.into();
-    let count_sql = count_serializer.serialize_count(&count_core_statement.into(), &mut count_params);
+    let count_statement: toasty_core::stmt::Statement = count_query.into_select().into();
+    let count_sql = count_serializer.serialize_count(&count_statement.into(), &mut count_params);
     let d1_count_params: Vec<_> = count_params.iter().map(to_d1_type).collect();
 
     // Execute the queries
@@ -150,9 +148,11 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result
                 .updated_at(now),
         );
     }
+
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&batch.untyped.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = batch.into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
     let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
@@ -164,19 +164,14 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    let id_strs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let id_strs: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
 
-    // For batch delete, we need to generate individual DELETE statements
-    // or use a WHERE IN clause. Let's use WHERE IN for efficiency.
-    let query = DbKey::filter(
-        DbKey::FIELDS
-            .id
-            .is_in(id_strs.iter().map(|s| s.to_string()).collect()),
-    );
-
+    let query = DbKey::filter(DbKey::FIELDS.id.is_in(ids));
+    
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.delete().untyped.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = query.into_select().delete().into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -185,11 +180,12 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
 }
 
 pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
-    let query = DbKey::filter(DbKey::FIELDS.provider.eq(provider))
-        .filter(DbKey::FIELDS.status.eq("blocked"));
+    let query = DbKey::filter_by_provider(provider.to_string()).filter_by_status("blocked".to_string());
+
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let sql = serializer.serialize(&query.delete().untyped.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = query.into_select().delete().into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -198,12 +194,12 @@ pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
 }
 
 pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<ApiKey>> {
-    let query = DbKey::filter(DbKey::FIELDS.id.eq(key_id));
+    let query = DbKey::filter_by_id(key_id.to_string());
+
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty::stmt::Statement<DbKey> = query.into();
-    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
-    let sql = serializer.serialize(&core_statement.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = query.into_select().into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -220,13 +216,12 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
         return Err(worker::Error::from("Provider not specified"));
     }
 
-    let query = DbKey::filter(DbKey::FIELDS.provider.eq(provider))
-        .filter(DbKey::FIELDS.status.eq("active"));
+    let query = DbKey::filter_by_provider(provider.to_string()).filter_by_status("active".to_string());
+
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty::stmt::Statement<DbKey> = query.into();
-    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
-    let sql = serializer.serialize(&core_statement.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = query.into_select().into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
 
     let unbound_stmt = db.prepare(&sql);
@@ -253,16 +248,15 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> R
     } else {
         "blocked"
     };
-    let query = DbKey::filter(DbKey::FIELDS.id.eq(id))
+    let query = DbKey::filter_by_id(id.to_string())
         .update()
-        .set(DbKey::FIELDS.status, status_str)
+        .set(DbKey::FIELDS.status, status_str.to_string())
         .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
 
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut params = vec![];
-    let statement: toasty::stmt::Statement<DbKey> = query.into();
-    let core_statement: toasty_core::stmt::Statement = statement.untyped.into();
-    let sql = serializer.serialize(&core_statement.into(), &mut params);
+    let statement: toasty_core::stmt::Statement = query.into();
+    let sql = serializer.serialize(&statement.into(), &mut params);
     let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
     let unbound_stmt = db.prepare(&sql);
     unbound_stmt.bind_refs(&d1_params)?.run().await?;
@@ -275,10 +269,12 @@ pub async fn set_cooldown(
     model: &str,
     duration_secs: u64,
 ) -> Result<()> {
-    let get_query = DbKey::filter(DbKey::FIELDS.id.eq(id));
+    let get_query = DbKey::filter_by_id(id.to_string());
+    
     let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
     let mut get_params = vec![];
-    let get_sql = serializer.serialize(&get_query.untyped.into(), &mut get_params);
+    let get_statement: toasty_core::stmt::Statement = get_query.into_select().into();
+    let get_sql = serializer.serialize(&get_statement.into(), &mut get_params);
     let get_d1_params: Vec<_> = get_params.iter().map(to_d1_type).collect();
     let get_unbound_stmt = db.prepare(&get_sql);
     let key_result: Option<DbKey> = get_unbound_stmt
@@ -294,13 +290,15 @@ pub async fn set_cooldown(
         coolings.insert(model.to_string(), cooldown_end as i64);
         let new_coolings_json = serde_json::to_string(&coolings).unwrap();
 
-        let update_query = DbKey::filter(DbKey::FIELDS.id.eq(id))
+        let update_query = DbKey::filter_by_id(id.to_string())
             .update()
             .set(DbKey::FIELDS.model_coolings, new_coolings_json)
             .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
+
         let update_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
         let mut update_params = vec![];
-        let update_sql = update_serializer.serialize(&update_query.untyped.into(), &mut update_params);
+        let update_statement: toasty_core::stmt::Statement = update_query.into();
+        let update_sql = update_serializer.serialize(&update_statement.into(), &mut update_params);
         let update_d1_params: Vec<_> = update_params.iter().map(to_d1_type).collect();
         let update_unbound_stmt = db.prepare(&update_sql);
         update_unbound_stmt
