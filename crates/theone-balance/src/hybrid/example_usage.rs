@@ -7,14 +7,14 @@ use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use anyhow::Result;
 use js_sys::Date;
 use serde_json;
-use std::collections::HashMap;
+use toasty::stmt::{IntoInsert, IntoSelect};
 use worker::D1Database;
 
 /// Example: Get active keys using the hybrid pattern
 pub async fn get_active_keys_hybrid(db: &D1Database, provider: &str) -> Result<Vec<ApiKey>> {
     // 1. Create the hybrid executor with schema
     let schema = schema_builder::get_schema().clone();
-    let executor = HybridExecutor::new(db.clone(), schema);
+    let executor = HybridExecutor::new(db, schema);
     
     // 2. Build query using Toasty's type-safe API
     let query = DbKey::filter_by_provider(provider.to_string())
@@ -41,7 +41,7 @@ pub async fn get_active_keys_hybrid(db: &D1Database, provider: &str) -> Result<V
 /// Example: Add keys using the hybrid pattern
 pub async fn add_keys_hybrid(db: &D1Database, provider: &str, keys_str: &str) -> Result<()> {
     let schema = schema_builder::get_schema().clone();
-    let executor = HybridExecutor::new(db.clone(), schema);
+    let executor = HybridExecutor::new(db, schema);
     
     let keys: Vec<String> = keys_str
         .split(|c| c == '\n' || c == ',')
@@ -55,23 +55,19 @@ pub async fn add_keys_hybrid(db: &D1Database, provider: &str, keys_str: &str) ->
     
     let now = (Date::now() / 1000.0) as i64;
     
-    // Create batch insert
-    let mut batch = DbKey::create_many();
+    // Insert keys individually since CreateMany requires a Db instance
     for key in keys {
-        batch.item(
-            DbKey::create()
-                .key(key)
-                .provider(provider.to_string())
-                .status("active".to_string())
-                .model_coolings("{}".to_string())
-                .total_cooling_seconds(0)
-                .created_at(now)
-                .updated_at(now),
-        );
+        let insert = DbKey::create()
+            .key(key)
+            .provider(provider.to_string())
+            .status("active".to_string())
+            .model_coolings("{}".to_string())
+            .total_cooling_seconds(0)
+            .created_at(now)
+            .updated_at(now);
+        
+        executor.exec_insert(insert.into_insert()).await?;
     }
-    
-    // Execute batch insert
-    executor.exec_insert(batch).await?;
     Ok(())
 }
 
@@ -82,7 +78,7 @@ pub async fn update_status_hybrid(
     status: ApiKeyStatus,
 ) -> Result<()> {
     let schema = schema_builder::get_schema().clone();
-    let executor = HybridExecutor::new(db.clone(), schema);
+    let executor = HybridExecutor::new(db, schema);
     
     let status_str = if status == ApiKeyStatus::Active {
         "active"
@@ -90,14 +86,28 @@ pub async fn update_status_hybrid(
         "blocked"
     };
     
-    // Build update query
-    let update_query = DbKey::filter_by_id(id.to_string())
-        .update()
-        .set(DbKey::FIELDS.status, status_str.to_string())
-        .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
+    // Since Toasty's update API doesn't support field-level set, we need to fetch and re-insert
+    let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
     
-    // Execute update
-    executor.exec_update(update_query).await?;
+    if let Some(mut key) = existing {
+        // Update the fields
+        key.status = status_str.to_string();
+        key.updated_at = (Date::now() / 1000.0) as i64;
+        
+        // Delete and re-insert (workaround for update limitation)
+        executor.exec_delete(DbKey::filter_by_id(id.to_string()).into_select().delete()).await?;
+        
+        let insert = DbKey::create()
+            .key(key.key)
+            .provider(key.provider)
+            .status(key.status)
+            .model_coolings(key.model_coolings)
+            .total_cooling_seconds(key.total_cooling_seconds)
+            .created_at(key.created_at)
+            .updated_at(key.updated_at);
+        
+        executor.exec_insert(insert.into_insert()).await?;
+    }
     Ok(())
 }
 
@@ -112,55 +122,53 @@ pub async fn list_keys_hybrid(
     sort_order: &str,
 ) -> Result<(Vec<ApiKey>, i32)> {
     let schema = schema_builder::get_schema().clone();
-    let executor = HybridExecutor::new(db.clone(), schema);
+    let executor = HybridExecutor::new(db, schema);
     
     // Build base query
     let query = DbKey::filter_by_provider(provider.to_string())
         .filter_by_status(status.to_string());
     
-    // Add ordering
-    let order_expr = match sort_by {
+    // Since Toasty doesn't have built-in limit/offset, we need to handle pagination manually
+    // First, get all matching records
+    let all_results = executor.exec_query(query).await?;
+    let total = all_results.len() as i32;
+    
+    // Sort the results based on the sort criteria
+    let mut sorted_results = all_results;
+    match sort_by {
         "createdAt" => {
             if sort_order == "asc" {
-                DbKey::FIELDS.created_at.asc()
+                sorted_results.sort_by_key(|k| k.created_at);
             } else {
-                DbKey::FIELDS.created_at.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.created_at));
             }
         }
         "totalCoolingSeconds" => {
             if sort_order == "asc" {
-                DbKey::FIELDS.total_cooling_seconds.asc()
+                sorted_results.sort_by_key(|k| k.total_cooling_seconds);
             } else {
-                DbKey::FIELDS.total_cooling_seconds.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.total_cooling_seconds));
             }
         }
         _ => {
             if sort_order == "asc" {
-                DbKey::FIELDS.updated_at.asc()
+                sorted_results.sort_by_key(|k| k.updated_at);
             } else {
-                DbKey::FIELDS.updated_at.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.updated_at));
             }
         }
-    };
+    }
     
-    // Add pagination
+    // Apply pagination
     let offset = (page - 1) * page_size;
-    let paginated_query = query
-        .order_by(order_expr)
-        .limit(page_size)
-        .offset(offset);
-    
-    // Execute main query
-    let db_keys = executor.exec_query(paginated_query).await?;
-    
-    // Execute count query
-    let count_query = DbKey::filter_by_provider(provider.to_string())
-        .filter_by_status(status.to_string());
-    let total_keys = executor.exec_query(count_query).await?;
-    let total = total_keys.len() as i32;
+    let paginated_results: Vec<DbKey> = sorted_results
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .collect();
     
     // Convert to API models
-    let api_keys: Vec<ApiKey> = db_keys.into_iter().map(db_key_to_api_key).collect();
+    let api_keys: Vec<ApiKey> = paginated_results.into_iter().map(db_key_to_api_key).collect();
     
     Ok((api_keys, total))
 }
@@ -186,7 +194,7 @@ fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
 /// Example: Using raw SQL when needed
 pub async fn custom_aggregation_hybrid(db: &D1Database) -> Result<Vec<ProviderStats>> {
     let schema = schema_builder::get_schema().clone();
-    let executor = HybridExecutor::new(db.clone(), schema);
+    let executor = HybridExecutor::new(db, schema);
     
     // Sometimes you need raw SQL for complex aggregations
     let sql = r#"

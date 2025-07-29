@@ -1,5 +1,6 @@
 use crate::dbmodels::Key as DbKey;
 use std::sync::Arc;
+use toasty::Model;
 use toasty_core::schema;
 
 /// Build the database schema for our models using Toasty's schema generation

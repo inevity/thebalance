@@ -27,11 +27,17 @@ pub struct D1ResultInfo {
 
 impl From<D1Result> for D1ResultInfo {
     fn from(result: D1Result) -> Self {
-        let meta = result.meta().unwrap_or_default();
-        Self {
-            rows_read: meta.rows_read,
-            rows_written: meta.rows_written,
-            duration: meta.duration,
+        match result.meta() {
+            Some(meta) => Self {
+                rows_read: meta.rows_read,
+                rows_written: meta.rows_written,
+                duration: meta.duration,
+            },
+            None => Self {
+                rows_read: 0,
+                rows_written: 0,
+                duration: 0.0,
+            }
         }
     }
 }

@@ -2,29 +2,13 @@
 //! It is only compiled when the `raw_d1` feature is enabled.
 
 use crate::dbmodels::Key as DbKey;
+use crate::hybrid::{get_schema, HybridExecutor};
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
 use std::collections::HashMap;
-use std::sync::Arc;
-use toasty::schema::Schema;
-use toasty::stmt::{IntoSelect, Value};
-use toasty_core::stmt::{Limit, Offset};
-use toasty_sql::Serializer as sqlser;
-use uuid::Uuid;
-use worker::{D1Database, D1Type, Result};
-
-// Create a static schema just for SQL generation
-static TOASTY_SCHEMA: once_cell::sync::Lazy<Arc<toasty_core::schema::db::Schema>> =
-    once_cell::sync::Lazy::new(|| {
-        let builder = toasty_core::schema::Builder::default();
-        let app_schema = toasty_core::schema::app::Schema::from_macro(&[DbKey::schema()])
-            .expect("Failed to build app schema");
-        let schema = builder
-            .build(app_schema, &toasty_core::driver::Capability::SQLITE)
-            .expect("Failed to build schema");
-        schema.db.clone() // Extract the db::Schema from the built Schema
-    });
+use toasty::stmt::{IntoInsert, IntoSelect};
+use worker::{D1Database, Result};
 
 /// Convert a DbKey to an ApiKey
 fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
@@ -44,6 +28,11 @@ fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
     }
 }
 
+// Helper to get the HybridExecutor
+fn get_executor(db: &D1Database) -> HybridExecutor {
+    HybridExecutor::new(db, get_schema().clone())
+}
+
 #[worker::send]
 pub async fn list_keys(
     db: &D1Database,
@@ -55,74 +44,58 @@ pub async fn list_keys(
     sort_by: &str,
     sort_order: &str,
 ) -> Result<(Vec<ApiKey>, i32)> {
-    let query =
-        DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
+    let executor = get_executor(db);
 
-    let count_query = DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
+    // Build the base query using correct Toasty API
+    let base_query = DbKey::filter_by_provider(provider.to_string())
+        .filter_by_status(status.to_string());
 
-    let order_expr = match sort_by {
+    // Since Toasty doesn't have built-in limit/offset in this version, handle pagination manually
+    let all_results = executor.exec_query(base_query).await?;
+    let total_count = all_results.len() as i32;
+
+    // Sort the results based on the sort criteria
+    let mut sorted_results = all_results;
+    match sort_by {
         "createdAt" => {
             if sort_order == "asc" {
-                DbKey::FIELDS.created_at.asc()
+                sorted_results.sort_by_key(|k| k.created_at);
             } else {
-                DbKey::FIELDS.created_at.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.created_at));
             }
         }
         "totalCoolingSeconds" => {
             if sort_order == "asc" {
-                DbKey::FIELDS.total_cooling_seconds.asc()
+                sorted_results.sort_by_key(|k| k.total_cooling_seconds);
             } else {
-                DbKey::FIELDS.total_cooling_seconds.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.total_cooling_seconds));
             }
         }
         _ => {
             if sort_order == "asc" {
-                DbKey::FIELDS.updated_at.asc()
+                sorted_results.sort_by_key(|k| k.updated_at);
             } else {
-                DbKey::FIELDS.updated_at.desc()
+                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.updated_at));
             }
         }
-    };
+    }
 
-    let statement: toasty_core::stmt::Statement = query.order_by(order_expr).into_select().into();
-
-    // Serialize the main query
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let mut sql = serializer.serialize(&statement.into(), &mut params);
-
-    // Manually append LIMIT and OFFSET for pagination
-    sql.pop(); // Remove the trailing semicolon
-    sql.push_str(" LIMIT ? OFFSET ?");
-    
+    // Apply pagination
     let offset = (page - 1) * page_size;
-    let mut d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-    d1_params.push(D1Type::Integer(page_size as i32));
-    d1_params.push(D1Type::Integer(offset as i32));
+    let paginated_results: Vec<DbKey> = sorted_results
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .collect();
 
-    // Serialize the count query
-    let count_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut count_params = vec![];
-    let count_statement: toasty_core::stmt::Statement = count_query.into_select().into();
-    let count_sql = count_serializer.serialize_count(&count_statement.into(), &mut count_params);
-    let d1_count_params: Vec<_> = count_params.iter().map(to_d1_type).collect();
+    let api_keys: Vec<ApiKey> = paginated_results.into_iter().map(db_key_to_api_key).collect();
 
-    // Execute the queries
-    let main_stmt = db.prepare(&sql).bind_refs(&d1_params)?;
-    let count_stmt = db.prepare(&count_sql).bind_refs(&d1_count_params)?;
-
-    let mut results = db.batch(vec![main_stmt, count_stmt]).await?;
-    let main_results = results.remove(0);
-    let count_results = results.remove(0);
-    let db_keys: Vec<DbKey> = main_results.results()?;
-    let total: i32 = count_results.results::<i32>()?.first().unwrap_or(Some(0)).unwrap_or(0);
-    
-    let api_keys: Vec<ApiKey> = db_keys.into_iter().map(db_key_to_api_key).collect();
-
-    Ok((api_keys, total))
+    Ok((api_keys, total_count))
 }
 
 pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result<()> {
+    let executor = get_executor(db);
+
     let keys: Vec<String> = keys_str
         .split(|c| c == '\n' || c == ',')
         .map(|s| s.trim().to_string())
@@ -134,28 +107,20 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result
     }
 
     let now = (Date::now() / 1000.0) as i64;
-    let mut batch = DbKey::create_many();
-
+    
+    // Insert keys individually since CreateMany needs a Db instance
     for key in keys {
-        batch.item(
-            DbKey::create()
-                .key(key)
-                .provider(provider.to_string())
-                .status("active".to_string())
-                .model_coolings("{}".to_string())
-                .total_cooling_seconds(0)
-                .created_at(now)
-                .updated_at(now),
-        );
+        let insert = DbKey::create()
+            .key(key)
+            .provider(provider.to_string())
+            .status("active".to_string())
+            .model_coolings("{}".to_string())
+            .total_cooling_seconds(0)
+            .created_at(now)
+            .updated_at(now);
+        
+        executor.exec_insert(insert.into_insert()).await?;
     }
-
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = batch.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-    let unbound_stmt = db.prepare(&sql);
-    unbound_stmt.bind_refs(&d1_params)?.run().await?;
 
     Ok(())
 }
@@ -164,48 +129,33 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    let id_strs: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+    let executor = get_executor(db);
 
-    let query = DbKey::filter(DbKey::FIELDS.id.is_in(ids));
-    
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into_select().delete().into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
+    // Use filter with in_list for multiple IDs
+    let query = DbKey::filter(DbKey::FIELDS.id.in_list(ids));
 
-    let unbound_stmt = db.prepare(&sql);
-    unbound_stmt.bind_refs(&d1_params)?.run().await?;
+    executor.exec_delete(query.into_select().delete()).await?;
     Ok(())
 }
 
 pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
-    let query = DbKey::filter_by_provider(provider.to_string()).filter_by_status("blocked".to_string());
+    let executor = get_executor(db);
 
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into_select().delete().into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
+    let query = DbKey::filter_by_provider(provider.to_string())
+        .filter_by_status("blocked".to_string());
 
-    let unbound_stmt = db.prepare(&sql);
-    unbound_stmt.bind_refs(&d1_params)?.run().await?;
+    executor.exec_delete(query.into_select().delete()).await?;
     Ok(())
 }
 
 pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<ApiKey>> {
+    let executor = get_executor(db);
+
     let query = DbKey::filter_by_id(key_id.to_string());
 
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into_select().into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
+    let key_result = executor.exec_first(query).await?;
 
-    let unbound_stmt = db.prepare(&sql);
-    let result: Option<DbKey> = unbound_stmt.bind_refs(&d1_params)?.first(None).await?;
-
-    match result {
+    match key_result {
         Some(db_key) => Ok(Some(db_key_to_api_key(db_key))),
         None => Ok(None),
     }
@@ -215,17 +165,12 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
     if provider.is_empty() {
         return Err(worker::Error::from("Provider not specified"));
     }
+    let executor = get_executor(db);
 
-    let query = DbKey::filter_by_provider(provider.to_string()).filter_by_status("active".to_string());
+    let query = DbKey::filter_by_provider(provider.to_string())
+        .filter_by_status("active".to_string());
 
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into_select().into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-
-    let unbound_stmt = db.prepare(&sql);
-    let db_keys: Vec<DbKey> = unbound_stmt.bind_refs(&d1_params)?.all().await?.results()?;
+    let db_keys = executor.exec_query(query).await?;
 
     let now = (Date::now() / 1000.0) as u64;
 
@@ -243,23 +188,27 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
 }
 
 pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> Result<()> {
-    let status_str = if status == ApiKeyStatus::Active {
-        "active"
-    } else {
-        "blocked"
-    };
-    let query = DbKey::filter_by_id(id.to_string())
-        .update()
-        .set(DbKey::FIELDS.status, status_str.to_string())
-        .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
+    let executor = get_executor(db);
 
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut params = vec![];
-    let statement: toasty_core::stmt::Statement = query.into();
-    let sql = serializer.serialize(&statement.into(), &mut params);
-    let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
-    let unbound_stmt = db.prepare(&sql);
-    unbound_stmt.bind_refs(&d1_params)?.run().await?;
+    // Get the existing key
+    let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
+    
+    if let Some(key) = existing {
+        // Create an update query starting from the filter
+        let status_str = if status == ApiKeyStatus::Active {
+            "active".to_string()
+        } else {
+            "blocked".to_string()
+        };
+        
+        let update_query = DbKey::filter_by_id(id.to_string())
+            .update()
+            .status(status_str)
+            .updated_at((Date::now() / 1000.0) as i64);
+        
+        executor.exec_update(update_query).await?;
+    }
+    
     Ok(())
 }
 
@@ -269,18 +218,9 @@ pub async fn set_cooldown(
     model: &str,
     duration_secs: u64,
 ) -> Result<()> {
-    let get_query = DbKey::filter_by_id(id.to_string());
-    
-    let serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-    let mut get_params = vec![];
-    let get_statement: toasty_core::stmt::Statement = get_query.into_select().into();
-    let get_sql = serializer.serialize(&get_statement.into(), &mut get_params);
-    let get_d1_params: Vec<_> = get_params.iter().map(to_d1_type).collect();
-    let get_unbound_stmt = db.prepare(&get_sql);
-    let key_result: Option<DbKey> = get_unbound_stmt
-        .bind_refs(&get_d1_params)?
-        .first(None)
-        .await?;
+    let executor = get_executor(db);
+
+    let key_result = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
 
     if let Some(key) = key_result {
         let mut coolings: HashMap<String, i64> =
@@ -290,36 +230,13 @@ pub async fn set_cooldown(
         coolings.insert(model.to_string(), cooldown_end as i64);
         let new_coolings_json = serde_json::to_string(&coolings).unwrap();
 
+        // Update using the update query builder
         let update_query = DbKey::filter_by_id(id.to_string())
             .update()
-            .set(DbKey::FIELDS.model_coolings, new_coolings_json)
-            .set(DbKey::FIELDS.updated_at, (Date::now() / 1000.0) as i64);
-
-        let update_serializer = sqlser::sqlite(&TOASTY_SCHEMA);
-        let mut update_params = vec![];
-        let update_statement: toasty_core::stmt::Statement = update_query.into();
-        let update_sql = update_serializer.serialize(&update_statement.into(), &mut update_params);
-        let update_d1_params: Vec<_> = update_params.iter().map(to_d1_type).collect();
-        let update_unbound_stmt = db.prepare(&update_sql);
-        update_unbound_stmt
-            .bind_refs(&update_d1_params)?
-            .run()
-            .await?;
+            .model_coolings(new_coolings_json)
+            .updated_at((Date::now() / 1000.0) as i64);
+        
+        executor.exec_update(update_query).await?;
     }
     Ok(())
-}
-
-fn to_d1_type<'a>(value: &'a Value) -> D1Type<'a> {
-    match value {
-        Value::Bool(v) => D1Type::Boolean(*v),
-        Value::I32(v) => D1Type::Integer(*v),
-        Value::I64(v) => D1Type::Integer(*v as i32), // D1 only supports i32
-        Value::String(v) => D1Type::Text(v),
-        Value::Id(id) => {
-            let id_str = id.to_string();
-            D1Type::Text(&id_str)
-        }
-        Value::Null => D1Type::Null,
-        _ => D1Type::Null, // Simplification
-    }
 }

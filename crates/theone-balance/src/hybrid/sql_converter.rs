@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use toasty::stmt::Statement;
 use toasty_core::stmt::Value;
 
@@ -19,24 +19,29 @@ pub fn statement_to_sql<M>(
 }
 
 /// Convert Toasty value to D1-compatible value
-pub fn to_d1_type(value: &Value) -> worker::D1Type {
+pub fn to_d1_type(value: &Value) -> worker::D1Type<'static> {
     match value {
         Value::Bool(v) => worker::D1Type::Boolean(*v),
         Value::I32(v) => worker::D1Type::Integer(*v),
         Value::I64(v) => worker::D1Type::Integer(*v as i32), // D1 only supports i32
-        Value::String(v) => worker::D1Type::Text(v),
+        Value::String(v) => {
+            // We need to leak the string to get 'static lifetime
+            let leaked: &'static str = Box::leak(v.clone().into_boxed_str());
+            worker::D1Type::Text(leaked)
+        }
         Value::Id(id) => {
-            // For ID values, we need to convert to owned string
+            // For ID values, we need to convert to owned string and leak it
             let id_str = id.to_string();
-            worker::D1Type::Text(id_str.into())
+            let leaked: &'static str = Box::leak(id_str.into_boxed_str());
+            worker::D1Type::Text(leaked)
         }
         Value::Null => worker::D1Type::Null,
-        Value::F64(v) => worker::D1Type::Number(*v),
+        Value::F64(v) => worker::D1Type::Real(*v),
         _ => worker::D1Type::Null, // Fallback for unsupported types
     }
 }
 
 /// Convert a vector of Toasty values to D1-compatible values
-pub fn convert_values_for_d1(values: Vec<Value>) -> Vec<worker::D1Type> {
+pub fn convert_values_for_d1(values: Vec<Value>) -> Vec<worker::D1Type<'static>> {
     values.iter().map(to_d1_type).collect()
 }

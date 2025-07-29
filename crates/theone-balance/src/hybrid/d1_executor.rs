@@ -1,22 +1,21 @@
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
-use toasty::{stmt::IntoSelect, Model, Statement};
+use toasty::{stmt::IntoSelect, Model};
 use toasty_core::schema::db::Schema;
-use toasty_sql::Serializer as SqlSerializer;
-use worker::{D1Database, D1PreparedStatement};
+use worker::D1Database;
 
-use crate::hybrid::sql_converter::to_d1_type;
+use crate::hybrid::sql_converter::{to_d1_type, statement_to_sql};
 
 /// Hybrid executor that combines Toasty query building with D1 execution
-pub struct HybridExecutor {
-    d1: D1Database,
+pub struct HybridExecutor<'a> {
+    d1: &'a D1Database,
     schema: Arc<Schema>,
 }
 
-impl HybridExecutor {
-    /// Create a new hybrid executor with D1 database and schema
-    pub fn new(d1: D1Database, schema: Arc<Schema>) -> Self {
+impl<'a> HybridExecutor<'a> {
+    /// Create a new hybrid executor with D1 database reference and schema
+    pub fn new(d1: &'a D1Database, schema: Arc<Schema>) -> Self {
         Self { d1, schema }
     }
 
@@ -25,13 +24,9 @@ impl HybridExecutor {
     where
         M: Model + DeserializeOwned,
     {
-        // Convert to statement
-        let statement: toasty_core::stmt::Statement = query.into_select().into();
-        
-        // Serialize to SQL
-        let serializer = SqlSerializer::sqlite(&self.schema);
-        let mut params = vec![];
-        let sql = serializer.serialize(&statement.into(), &mut params);
+        // Convert to Statement<M> then extract SQL and params
+        let statement: toasty::stmt::Statement<M> = query.into_select().into();
+        let (sql, params) = statement_to_sql(statement, &self.schema)?;
         
         // Convert parameters to D1 types
         let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
@@ -43,18 +38,14 @@ impl HybridExecutor {
         Ok(results)
     }
 
-    /// Execute a single SELECT query and return the first result
+    /// Execute a SELECT query and return the first result
     pub async fn exec_first<M>(&self, query: impl IntoSelect<Model = M>) -> Result<Option<M>>
     where
         M: Model + DeserializeOwned,
     {
-        // Convert to statement
-        let statement: toasty_core::stmt::Statement = query.into_select().into();
-        
-        // Serialize to SQL
-        let serializer = SqlSerializer::sqlite(&self.schema);
-        let mut params = vec![];
-        let sql = serializer.serialize(&statement.into(), &mut params);
+        // Convert to Statement<M> then extract SQL and params
+        let statement: toasty::stmt::Statement<M> = query.into_select().into();
+        let (sql, params) = statement_to_sql(statement, &self.schema)?;
         
         // Convert parameters to D1 types
         let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
@@ -71,13 +62,9 @@ impl HybridExecutor {
     where
         M: Model,
     {
-        // Convert to statement
-        let statement: toasty_core::stmt::Statement = insert.into();
-        
-        // Serialize to SQL
-        let serializer = SqlSerializer::sqlite(&self.schema);
-        let mut params = vec![];
-        let sql = serializer.serialize(&statement.into(), &mut params);
+        // Convert to Statement<M> then extract SQL and params
+        let statement: toasty::stmt::Statement<M> = insert.into();
+        let (sql, params) = statement_to_sql(statement, &self.schema)?;
         
         // Convert parameters to D1 types
         let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
@@ -94,13 +81,9 @@ impl HybridExecutor {
     where
         M: Model,
     {
-        // Convert to statement
-        let statement: toasty_core::stmt::Statement = update.into();
-        
-        // Serialize to SQL
-        let serializer = SqlSerializer::sqlite(&self.schema);
-        let mut params = vec![];
-        let sql = serializer.serialize(&statement.into(), &mut params);
+        // Convert to Statement<M> then extract SQL and params
+        let statement: toasty::stmt::Statement<M> = update.into();
+        let (sql, params) = statement_to_sql(statement, &self.schema)?;
         
         // Convert parameters to D1 types
         let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
@@ -112,18 +95,13 @@ impl HybridExecutor {
         Ok(())
     }
 
-    /// Execute a DELETE statement  
-    pub async fn exec_delete<M>(&self, delete: toasty::stmt::Delete<M>) -> Result<()>
+    /// Execute a DELETE statement
+    pub async fn exec_delete<M>(&self, statement: toasty::stmt::Statement<M>) -> Result<()>
     where
         M: Model,
     {
-        // Convert to statement
-        let statement: toasty_core::stmt::Statement = delete.into();
-        
-        // Serialize to SQL
-        let serializer = SqlSerializer::sqlite(&self.schema);
-        let mut params = vec![];
-        let sql = serializer.serialize(&statement.into(), &mut params);
+        // Extract SQL and params from the statement
+        let (sql, params) = statement_to_sql(statement, &self.schema)?;
         
         // Convert parameters to D1 types
         let d1_params: Vec<_> = params.iter().map(to_d1_type).collect();
@@ -136,7 +114,7 @@ impl HybridExecutor {
     }
 
     /// Execute raw SQL with parameters
-    pub async fn exec_raw<T>(&self, sql: &str, params: Vec<worker::D1Type>) -> Result<Vec<T>>
+    pub async fn exec_raw<T>(&self, sql: &str, params: Vec<worker::D1Type<'_>>) -> Result<Vec<T>>
     where
         T: DeserializeOwned,
     {
@@ -147,11 +125,6 @@ impl HybridExecutor {
 
     /// Get the underlying D1 database for direct access
     pub fn d1(&self) -> &D1Database {
-        &self.d1
-    }
-
-    /// Get the schema
-    pub fn schema(&self) -> &Arc<Schema> {
-        &self.schema
+        self.d1
     }
 }

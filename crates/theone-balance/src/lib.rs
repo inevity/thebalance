@@ -4,6 +4,7 @@ pub mod dbmodels;
 pub mod error_handling;
 pub mod gcp;
 pub mod handlers;
+pub mod hybrid;
 pub mod models;
 pub mod queue;
 pub mod router;

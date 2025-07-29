@@ -2,11 +2,11 @@
 
 use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
 use axum::{
-    extract::{Form, FromRef, FromRequest, FromRequestParts, Path, Query, State},
+    extract::{Form, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Json, Redirect, Response},
     routing::get,
-    RequestPartsExt, Router,
+    Router,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use phf::phf_map;

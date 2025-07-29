@@ -50,7 +50,7 @@ fn get_do_stub(env: &Env) -> Result<worker::Stub> {
 }
 
 // A helper to fetch all active keys for a given provider.
-async fn get_active_keys(provider: &str, env: &Env) -> Result<Vec<ApiKey>> {
+pub async fn get_active_keys(provider: &str, env: &Env) -> Result<Vec<ApiKey>> {
     #[cfg(feature = "raw_d1")]
     {
         let db = env.d1("DB")?;
