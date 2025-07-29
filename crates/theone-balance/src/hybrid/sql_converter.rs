@@ -13,7 +13,7 @@ pub fn statement_to_sql<M>(
     let serializer = toasty_sql::Serializer::sqlite(schema);
     
     // Serialize the statement to SQL
-    let sql = serializer.serialize(&statement.untyped.into(), &mut params);
+    let sql = serializer.serialize(&statement.into_untyped().into(), &mut params);
     
     Ok((sql, params))
 }
@@ -36,7 +36,6 @@ pub fn to_d1_type(value: &Value) -> worker::D1Type<'static> {
             worker::D1Type::Text(leaked)
         }
         Value::Null => worker::D1Type::Null,
-        Value::F64(v) => worker::D1Type::Real(*v),
         _ => worker::D1Type::Null, // Fallback for unsupported types
     }
 }

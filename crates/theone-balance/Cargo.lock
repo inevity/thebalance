@@ -1160,6 +1160,7 @@ dependencies = [
  "async-stream",
  "by_address",
  "indexmap",
+ "serde",
  "toasty-core",
  "toasty-macros",
  "tokio-stream",

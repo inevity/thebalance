@@ -54,7 +54,7 @@ pub async fn get_active_keys(provider: &str, env: &Env) -> Result<Vec<ApiKey>> {
     #[cfg(feature = "raw_d1")]
     {
         let db = env.d1("DB")?;
-        crate::d1_storage::get_active_keys(&db, provider).await
+        Ok(crate::d1_storage::get_active_keys(&db, provider).await.map_err(|e| worker::Error::from(e))?)
     }
     #[cfg(not(feature = "raw_d1"))]
     {

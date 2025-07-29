@@ -1,14 +1,36 @@
 //! This module contains the state management logic using a raw D1 database binding.
 //! It is only compiled when the `raw_d1` feature is enabled.
 
-use crate::dbmodels::Key as DbKey;
+use crate::dbmodels::{Key as DbKey, ModelCooling};
 use crate::hybrid::{get_schema, HybridExecutor};
+use crate::hybrid::update_support::IntoUpdateStatement;
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
 use std::collections::HashMap;
 use toasty::stmt::{IntoInsert, IntoSelect};
-use worker::{D1Database, Result};
+use worker::D1Database;
+use toasty::Error as ToastyError;
+use std::result::Result as StdResult;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("Toasty error: {0}")]
+    Toasty(#[from] ToastyError),
+    #[error("Worker error: {0}")]
+    Worker(#[from] worker::Error),
+}
+
+impl From<StorageError> for worker::Error {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Toasty(e) => worker::Error::RustError(format!("Toasty error: {}", e)),
+            StorageError::Worker(e) => e,
+        }
+    }
+}
+
 
 /// Convert a DbKey to an ApiKey
 fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
@@ -43,13 +65,13 @@ pub async fn list_keys(
     page_size: usize,
     sort_by: &str,
     sort_order: &str,
-) -> Result<(Vec<ApiKey>, i32)> {
+) -> StdResult<(Vec<ApiKey>, i32), StorageError> {
     let executor = get_executor(db);
 
     // Build the base query using correct Toasty API
     let base_query = DbKey::filter_by_provider(provider.to_string())
         .filter_by_status(status.to_string());
-
+    
     // Since Toasty doesn't have built-in limit/offset in this version, handle pagination manually
     let all_results = executor.exec_query(base_query).await?;
     let total_count = all_results.len() as i32;
@@ -93,7 +115,7 @@ pub async fn list_keys(
     Ok((api_keys, total_count))
 }
 
-pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result<()> {
+pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     let keys: Vec<String> = keys_str
@@ -125,20 +147,20 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> Result
     Ok(())
 }
 
-pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> Result<()> {
+pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> StdResult<(), StorageError> {
     if ids.is_empty() {
         return Ok(());
     }
     let executor = get_executor(db);
 
-    // Use filter with in_list for multiple IDs
-    let query = DbKey::filter(DbKey::FIELDS.id.in_list(ids));
+    // Use filter with in_set for multiple IDs
+    let query = DbKey::filter(DbKey::FIELDS.id.in_set(ids));
 
     executor.exec_delete(query.into_select().delete()).await?;
     Ok(())
 }
 
-pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
+pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     let query = DbKey::filter_by_provider(provider.to_string())
@@ -148,11 +170,11 @@ pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<ApiKey>> {
+pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> StdResult<Option<ApiKey>, StorageError> {
     let executor = get_executor(db);
 
     let query = DbKey::filter_by_id(key_id.to_string());
-
+    
     let key_result = executor.exec_first(query).await?;
 
     match key_result {
@@ -161,9 +183,9 @@ pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> Result<Option<Ap
     }
 }
 
-pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiKey>> {
+pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
     if provider.is_empty() {
-        return Err(worker::Error::from("Provider not specified"));
+        return Err(StorageError::Worker(worker::Error::from("Provider not specified")));
     }
     let executor = get_executor(db);
 
@@ -176,25 +198,29 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> Result<Vec<ApiK
 
     let active_keys: Vec<ApiKey> = db_keys
         .into_iter()
-        .map(db_key_to_api_key)
-        .filter(|k: &ApiKey| {
-            k.model_coolings
-                .values()
-                .all(|cooldown_end| now >= *cooldown_end as u64)
+        .filter_map(|key| {
+            // Check if model_coolings has active cooldowns
+            let coolings = key.get_model_coolings().ok()??;
+            for (_, cooling) in coolings.iter() {
+                if cooling.end_at as u64 > now {
+                    return None; // Still cooling
+                }
+            }
+            Some(db_key_to_api_key(key))
         })
         .collect();
 
     Ok(active_keys)
 }
 
-pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> Result<()> {
+pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     // Get the existing key
     let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
     
-    if let Some(key) = existing {
-        // Create an update query starting from the filter
+    if existing.is_some() {
+        // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
             "active".to_string()
         } else {
@@ -206,7 +232,8 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> R
             .status(status_str)
             .updated_at((Date::now() / 1000.0) as i64);
         
-        executor.exec_update(update_query).await?;
+        // Now we can access the public stmt field and execute it
+        executor.exec_update(update_query.stmt).await?;
     }
     
     Ok(())
@@ -217,7 +244,7 @@ pub async fn set_cooldown(
     id: &str,
     model: &str,
     duration_secs: u64,
-) -> Result<()> {
+) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     let key_result = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
@@ -230,13 +257,14 @@ pub async fn set_cooldown(
         coolings.insert(model.to_string(), cooldown_end as i64);
         let new_coolings_json = serde_json::to_string(&coolings).unwrap();
 
-        // Update using the update query builder
+        // Use toasty's update query
         let update_query = DbKey::filter_by_id(id.to_string())
             .update()
             .model_coolings(new_coolings_json)
             .updated_at((Date::now() / 1000.0) as i64);
         
-        executor.exec_update(update_query).await?;
+        // Now we can access the public stmt field and execute it
+        executor.exec_update(update_query.stmt).await?;
     }
     Ok(())
 }

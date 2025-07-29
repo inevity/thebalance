@@ -28,12 +28,12 @@ pub struct D1ResultInfo {
 impl From<D1Result> for D1ResultInfo {
     fn from(result: D1Result) -> Self {
         match result.meta() {
-            Some(meta) => Self {
-                rows_read: meta.rows_read,
-                rows_written: meta.rows_written,
-                duration: meta.duration,
+            Ok(Some(meta)) => Self {
+                rows_read: meta.rows_read.unwrap_or(0) as u64,
+                rows_written: meta.rows_written.unwrap_or(0) as u64,
+                duration: meta.duration.unwrap_or(0.0),
             },
-            None => Self {
+            Ok(None) | Err(_) => Self {
                 rows_read: 0,
                 rows_written: 0,
                 duration: 0.0,

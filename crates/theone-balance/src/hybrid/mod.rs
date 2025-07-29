@@ -3,6 +3,7 @@ pub mod d1_executor;
 pub mod result_mapper;
 pub mod schema_builder;
 pub mod example_usage;
+pub mod update_support;
 
 pub use d1_executor::HybridExecutor;
 pub use sql_converter::{statement_to_sql, to_d1_type};

@@ -29,6 +29,7 @@ pub struct Key {
     pub updated_at: i64,
 }
 
+
 impl Key {
     pub fn get_model_coolings(&self) -> anyhow::Result<Option<HashMap<String, ModelCooling>>> {
         if self.model_coolings.is_empty() || self.model_coolings == "null" {
