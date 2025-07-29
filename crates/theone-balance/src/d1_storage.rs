@@ -8,6 +8,7 @@ use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
 use std::collections::HashMap;
+use std::cell::RefCell;
 use toasty::stmt::{IntoInsert, IntoSelect};
 use worker::D1Database;
 use toasty::Error as ToastyError;
@@ -31,6 +32,20 @@ impl From<StorageError> for worker::Error {
     }
 }
 
+#[derive(Clone)]
+struct Cache<T> {
+    data: T,
+    updated_at: f64, // seconds since epoch
+    is_dirty: bool,
+}
+
+// Thread-local storage for active keys cache
+// Only shared within a worker instance (shutdown if idle)
+thread_local! {
+    static ACTIVE_KEYS_CACHE_BY_PROVIDER: RefCell<HashMap<String, Cache<Vec<ApiKey>>>> = RefCell::new(HashMap::new());
+}
+
+const CACHE_MAX_AGE_SECONDS: f64 = 30.0;
 
 /// Convert a DbKey to an ApiKey
 fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
@@ -69,47 +84,47 @@ pub async fn list_keys(
     let executor = get_executor(db);
 
     // Build the base query using correct Toasty API
-    let base_query = DbKey::filter_by_provider(provider.to_string())
+    let mut base_query = DbKey::filter_by_provider(provider.to_string())
         .filter_by_status(status.to_string());
     
-    // Since Toasty doesn't have built-in limit/offset in this version, handle pagination manually
-    let all_results = executor.exec_query(base_query).await?;
-    let total_count = all_results.len() as i32;
-
-    // Sort the results based on the sort criteria
-    let mut sorted_results = all_results;
+    // Apply sorting
     match sort_by {
         "createdAt" => {
             if sort_order == "asc" {
-                sorted_results.sort_by_key(|k| k.created_at);
+                base_query = base_query.order_by(DbKey::FIELDS.created_at.asc());
             } else {
-                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.created_at));
+                base_query = base_query.order_by(DbKey::FIELDS.created_at.desc());
             }
         }
         "totalCoolingSeconds" => {
             if sort_order == "asc" {
-                sorted_results.sort_by_key(|k| k.total_cooling_seconds);
+                base_query = base_query.order_by(DbKey::FIELDS.total_cooling_seconds.asc());
             } else {
-                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.total_cooling_seconds));
+                base_query = base_query.order_by(DbKey::FIELDS.total_cooling_seconds.desc());
             }
         }
         _ => {
             if sort_order == "asc" {
-                sorted_results.sort_by_key(|k| k.updated_at);
+                base_query = base_query.order_by(DbKey::FIELDS.updated_at.asc());
             } else {
-                sorted_results.sort_by_key(|k| std::cmp::Reverse(k.updated_at));
+                base_query = base_query.order_by(DbKey::FIELDS.updated_at.desc());
             }
         }
     }
-
-    // Apply pagination
+    
+    // Get total count - we need a separate query for this
+    let count_query = DbKey::filter_by_provider(provider.to_string())
+        .filter_by_status(status.to_string());
+    let all_results = executor.exec_query(count_query).await?;
+    let total_count = all_results.len() as i32;
+    
+    // Apply pagination with limit and offset
     let offset = (page - 1) * page_size;
-    let paginated_results: Vec<DbKey> = sorted_results
-        .into_iter()
-        .skip(offset)
-        .take(page_size)
-        .collect();
-
+    let paginated_query = base_query
+        .limit(page_size as i64)
+        .offset(offset as i64);
+    
+    let paginated_results = executor.exec_query(paginated_query).await?;
     let api_keys: Vec<ApiKey> = paginated_results.into_iter().map(db_key_to_api_key).collect();
 
     Ok((api_keys, total_count))
@@ -213,13 +228,69 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
     Ok(active_keys)
 }
 
+pub async fn list_active_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
+    let now = Date::now() / 1000.0;
+    
+    // Check if we have a valid cache entry
+    let needs_refresh = ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+        let cache_map = cache.borrow();
+        if let Some(cache_entry) = cache_map.get(provider) {
+            now - cache_entry.updated_at >= CACHE_MAX_AGE_SECONDS || cache_entry.is_dirty
+        } else {
+            true
+        }
+    });
+    
+    if !needs_refresh {
+        // Return cached data
+        return Ok(ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+            cache.borrow()
+                .get(provider)
+                .map(|entry| entry.data.clone())
+                .unwrap_or_else(Vec::new)
+        }));
+    }
+    
+    // Cache miss or expired, fetch from database
+    let keys = get_active_keys(db, provider).await?;
+    
+    // Update cache
+    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+        let mut cache_map = cache.borrow_mut();
+        cache_map.insert(
+            provider.to_string(),
+            Cache {
+                data: keys.clone(),
+                updated_at: now,
+                is_dirty: false,
+            },
+        );
+    });
+    
+    worker::console_log!("cache refreshed for {}: {} keys", provider, keys.len());
+    Ok(keys)
+}
+
+// Helper function to mark cache as dirty when keys are modified
+fn mark_provider_cache_dirty(provider: &str) {
+    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+        let mut cache_map = cache.borrow_mut();
+        if let Some(cache_entry) = cache_map.get_mut(provider) {
+            cache_entry.is_dirty = true;
+        }
+    });
+}
+
 pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     // Get the existing key
     let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
     
-    if existing.is_some() {
+    if let Some(key) = existing {
+        // Mark cache as dirty for this provider
+        mark_provider_cache_dirty(&key.provider);
+        
         // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
             "active".to_string()
@@ -267,4 +338,61 @@ pub async fn set_cooldown(
         executor.exec_update(update_query.stmt).await?;
     }
     Ok(())
+}
+
+pub async fn set_key_model_cooldown_if_available(
+    db: &D1Database,
+    id: &str,
+    provider: &str,
+    model: &str,
+    duration_secs: u64,
+) -> StdResult<bool, StorageError> {
+    let executor = get_executor(db);
+    let now = (Date::now() / 1000.0) as u64;
+
+    // First, get the key to check if it exists and if the model is already cooling down
+    let key_result = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
+    
+    if let Some(mut key) = key_result {
+        // Parse the existing model coolings
+        let mut coolings: HashMap<String, ModelCooling> = 
+            key.get_model_coolings()?.unwrap_or_default();
+        
+        // Check if this model is already cooling down
+        if let Some(cooling) = coolings.get(model) {
+            if cooling.end_at as u64 > now {
+                // Already cooling down, do nothing
+                return Ok(false);
+            }
+        }
+        
+        // Update the cooling for this model
+        let new_cooling = ModelCooling {
+            total_seconds: coolings.get(model).map(|c| c.total_seconds).unwrap_or(0) + duration_secs as i64,
+            end_at: (now + duration_secs) as i64,
+        };
+        coolings.insert(model.to_string(), new_cooling);
+        
+        // Update the key with new coolings
+        key.set_model_coolings(&coolings)?;
+        
+        // Calculate new total cooling seconds
+        let new_total_cooling_seconds = key.total_cooling_seconds + duration_secs as i64;
+        
+        // Update in database
+        let update_query = DbKey::filter_by_id(id.to_string())
+            .update()
+            .model_coolings(key.model_coolings)
+            .total_cooling_seconds(new_total_cooling_seconds)
+            .updated_at(now as i64);
+        
+        executor.exec_update(update_query.stmt).await?;
+        
+        // Mark cache as dirty for this provider
+        mark_provider_cache_dirty(provider);
+        
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
