@@ -16,7 +16,7 @@ pub fn statement_to_sql<M>(
     let lowered_stmt = toasty::lowering::lower(full_schema, statement)?;
     
     // Create SQLite serializer
-    let serializer = toasty_sql::Serializer::sqlite(schema);
+    let serializer = toasty_sql::Serializer::sqlite(&full_schema.db, &full_schema.app);
     
     // Convert toasty_core::stmt::Statement to toasty_sql::Statement
     let sql_stmt: toasty_sql::Statement = match lowered_stmt {

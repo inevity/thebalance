@@ -3,7 +3,7 @@
 //! which requires a direct provider call.
 
 use crate::models::{
-    GeminiContent, GeminiEmbeddingContent, GeminiEmbeddingsRequest, GeminiEmbeddingsResponse, GeminiPart,
+    EmbeddingInput, GeminiContent, GeminiEmbeddingContent, GeminiEmbeddingsRequest, GeminiEmbeddingsResponse, GeminiPart,
     OpenAiEmbedding, OpenAiEmbeddingsRequest, OpenAiEmbeddingsResponse, OpenAiUsage,
     OpenAiChatCompletionRequest, GeminiChatRequest, GeminiChatResponse, OpenAiChatCompletionResponse,
     OpenAiChatChoice, OpenAiChatMessage,
@@ -14,8 +14,12 @@ pub fn translate_embeddings_request(
     req: OpenAiEmbeddingsRequest,
     model_name: &str,
 ) -> GeminiEmbeddingsRequest {
-    let requests = req
-        .input
+    let inputs = match req.input {
+        EmbeddingInput::String(s) => vec![s],
+        EmbeddingInput::StringArray(arr) => arr,
+    };
+
+    let requests = inputs
         .into_iter()
         .map(|text| GeminiEmbeddingContent {
             model: format!("models/{}", model_name),

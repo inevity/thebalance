@@ -21,8 +21,15 @@ pub struct OpenAiChatMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    String(String),
+    StringArray(Vec<String>),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAiEmbeddingsRequest {
-    pub input: Vec<String>,
+    pub input: EmbeddingInput,
     pub model: String,
 }
 

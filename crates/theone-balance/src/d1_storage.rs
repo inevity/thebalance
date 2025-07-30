@@ -2,6 +2,7 @@
 //! It is only compiled when the `raw_d1` feature is enabled.
 
 use crate::dbmodels::{Key as DbKey, ModelCooling};
+use toasty::Model;
 use crate::hybrid::{get_schema, HybridExecutor};
 use crate::hybrid::update_support::IntoUpdateStatement;
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
@@ -38,6 +39,9 @@ struct Cache<T> {
     updated_at: f64, // seconds since epoch
     is_dirty: bool,
 }
+
+use uuid::Uuid;
+use toasty::stmt::Id;
 
 // Thread-local storage for active keys cache
 // Only shared within a worker instance (shutdown if idle)
@@ -147,7 +151,12 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdRes
     
     // Insert keys individually since CreateMany needs a Db instance
     for key in keys {
+        let id_str = Uuid::new_v4().to_string();
+        let untyped_id = toasty_core::stmt::Id::from_string(DbKey::ID, id_str);
+        let typed_id = toasty::stmt::Id::from_untyped(untyped_id);
+
         let insert = DbKey::create()
+            .id(typed_id)
             .key(key)
             .provider(provider.to_string())
             .status("active".to_string())

@@ -998,7 +998,7 @@ fn build_add_keys_form(
                 }
                 div class="flex justify-end" {
                     button type="submit"
-                            formaction={"/keys/" (provider) (build_page_link(provider, current_status, q, page, 20, sort_by, sort_order))}
+                            formaction={"/keys/" (provider)}
                             class="btn-primary px-6 py-3 text-white font-semibold rounded-xl focus:outline-none focus:ring-4 focus:ring-blue-200" {
                         "Add Keys"
                     }
