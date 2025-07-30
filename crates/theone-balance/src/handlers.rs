@@ -372,12 +372,23 @@ async fn handle_embeddings_fallback(
 
     // In local development, we only make one attempt directly to the native API.
     if is_local_dev {
-        return try_native_embeddings_request(
+        match try_native_embeddings_request(
             selected_key,
             model_name,
             &gemini_body_bytes,
             queue,
-        ).await;
+        ).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                // In local dev, return a proper error response instead of propagating the error
+                return Ok(create_openai_error_response(
+                    &format!("Local dev embeddings request failed: {}. Make sure you have a valid Google API key.", e),
+                    "invalid_request_error",
+                    "local_dev_error",
+                    400,
+                ).0);
+            }
+        }
     }
 
     // --- Attempt 2: AI Gateway (Provider-Specific) ---
