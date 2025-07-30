@@ -35,6 +35,7 @@
         "AI_GATEWAY": "one-balance",
         "CLOUDFLARE_ACCOUNT_ID": "YOUR_ACCOUNT_ID_HERE",
         "CLOUDFLARE_API_TOKEN": "xxxxx",
+        "AI_GATEWAY_TOKEN": "xxxx"
         "IS_LOCAL": "false"
 
     }
