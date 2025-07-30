@@ -53,8 +53,8 @@ async function main() {
     const varsToSet = {
         AUTH_KEY: process.env.AUTH_KEY || "local-auth-key",
         AI_GATEWAY: process.env.AI_GATEWAY || "one-balance",
-        CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID || "local_account_id",
-        CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN || "local-cf-api-token",
+        // CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID || "local_account_id",
+        // CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN || "local-cf-api-token",
         IS_LOCAL: "true"
     };
 

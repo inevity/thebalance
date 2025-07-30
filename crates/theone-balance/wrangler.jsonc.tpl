@@ -1,6 +1,6 @@
 {
     "$schema": "https://developers.cloudflare.com/workers/wrangler/wrangler-schema.json",
-    "name": "one-balance-rust",
+    "name": "theone",
     "main": "build/worker/shim.mjs",
     "compatibility_date": "2025-07-21",
     "build": {
@@ -12,7 +12,7 @@
     "d1_databases": [
         {
             "binding": "DB",
-            "database_name": "one-balance",
+            "database_name": "llm",
             "database_id": "xfefef",
             "migrations_dir": "migrations"
         }
@@ -33,9 +33,8 @@
     "vars": {
         "AUTH_KEY": "my-auth-key",
         "AI_GATEWAY": "one-balance",
-        "CLOUDFLARE_ACCOUNT_ID": "YOUR_ACCOUNT_ID_HERE",
         "CLOUDFLARE_API_TOKEN": "xxxxx",
-        "AI_GATEWAY_TOKEN": "xxxx"
+        "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false"
 
     }

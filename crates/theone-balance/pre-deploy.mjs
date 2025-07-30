@@ -54,6 +54,7 @@ async function main() {
 
     const authKey = process.env.AUTH_KEY
     const aiGatewayToken = process.env.AI_GATEWAY_TOKEN
+    const oauthtoken = process.env.CLOUDFLARE_API_TOKEN
     const config = getWranglerConfig()
 
     if (authKey) {
@@ -65,6 +66,12 @@ async function main() {
         console.log(`Setting AI_GATEWAY_TOKEN to '${aiGatewayToken}'...`)
         config.vars.AI_GATEWAY_TOKEN = aiGatewayToken
     }
+    if (oauthtoken) {
+        console.log(`Setting CLOUDFLARE_API_TOKEN  to '${oauthtoken}'...`)
+        config.vars.CLOUDFLARE_API_TOKEN = oauthtoken
+    }
+    config.vars.IS_LOCAL = "false"
+
 
     // TODO: auto create ai gateway when wrangler supports it
 
