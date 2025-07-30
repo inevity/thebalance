@@ -11,6 +11,7 @@ use axum::{
 };
 use js_sys::Date;
 use phf::phf_map;
+use tracing::{error, info};
 use worker::{Env, Response, Result};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
@@ -156,6 +157,7 @@ pub async fn forward(
 ) -> impl IntoResponse {
     let result: Result<axum::response::Response> = async {
         let env = &state.env;
+        info!("Incoming request for: {}", path);
         // --- 1. Extract Info & Authenticate ---
         let rest_resource = path;
 
@@ -177,12 +179,14 @@ pub async fn forward(
 
         let (provider, model_name) =
             util::extract_provider_and_model(&body_bytes, &rest_resource)?;
+        info!(provider = provider, model = model_name, "Extracted provider and model");
         let queue = env.queue("STATE_UPDATER")?;
 
         // --- 2. Get and Shuffle Active Keys ---
         let active_keys = match get_active_keys(&provider, env).await {
             Ok(keys) if !keys.is_empty() => keys,
             _ => {
+                error!(provider = provider, "No active keys available for provider.");
                 return Ok(create_openai_error_response(
                     "No active keys available for this provider.",
                     "server_error",
@@ -339,6 +343,7 @@ pub async fn forward(
             // If we reach here, it was a key issue, so we continue to the next key.
         }
 
+        error!("All keys failed for provider '{}' and model '{}'", provider, model_name);
         Ok(create_openai_error_response(
             "All available keys failed or are on cooldown.",
             "server_error",

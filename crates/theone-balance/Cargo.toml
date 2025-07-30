@@ -42,6 +42,8 @@ thiserror = "2.0"
 
 # Logging and Debugging
 tracing = "0.1"
+tracing-web = "0.1"
+tracing-subscriber = { version = "0.3", features = ["time", "json"] }
 console_error_panic_hook = "0.1.7"
 
 # Utilities
