@@ -1,6 +1,7 @@
 //! This module contains all UI-related logic, including Axum handlers and Maud templates.
 
 use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
+use std::sync::Arc;
 use axum::{
     extract::{Form, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
@@ -10,7 +11,8 @@ use axum::{
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use phf::phf_map;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 use time::Duration;
 use tower_cookies::{Cookie, Cookies};
 
@@ -45,7 +47,7 @@ static PROVIDER_CONFIGS: phf::Map<&'static str, ProviderConfig> = phf_map! {
 
 // --- Router ---
 
-pub fn ui_router() -> Router<AppState> {
+pub fn ui_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_providers_page_handler))
         .route(
@@ -73,7 +75,7 @@ pub async fn get_login_page_handler() -> Markup {
 
 pub async fn post_login_handler(
     cookies: Cookies,
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Form(form): Form<LoginForm>,
 ) -> impl IntoResponse {
     if util::is_valid_auth_key(&form.auth_key, &state.env) {
@@ -109,7 +111,7 @@ pub struct KeysListParams {
 // #[axum::debug_handler]
 #[worker::send]
 pub async fn get_keys_list_page_handler(
-    State(state): State<crate::AppState>,
+    State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
     Query(params): Query<KeysListParams>,
     _layout: PageLayout,
@@ -167,11 +169,50 @@ pub async fn get_keys_list_page_handler(
     (StatusCode::OK, page_layout(content)).into_response()
 }
 
+// When a form has multiple checkboxes with the same name, it can be submitted
+// as either a sequence of values (if multiple are checked) or a single string
+// (if only one is checked). This custom deserializer handles both cases and
+// always returns a Vec<String>.
+fn deserialize_one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct OneOrManyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OneOrManyVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or a sequence of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut vec = Vec::new();
+            while let Some(item) = seq.next_element()? {
+                vec.push(item);
+            }
+            Ok(vec)
+        }
+    }
+
+    deserializer.deserialize_any(OneOrManyVisitor)
+}
+
 #[derive(Deserialize, Debug)]
 pub struct KeysListForm {
     action: String,
     keys: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
     key_id: Vec<String>,
 }
 
@@ -231,7 +272,7 @@ pub struct KeysListForm {
 
 #[worker::send]
 pub async fn post_keys_list_handler(
-    State(state): State<crate::AppState>,
+    State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
     Form(form): Form<KeysListForm>,
 ) -> impl IntoResponse {
@@ -329,7 +370,7 @@ pub async fn post_keys_list_handler(
 // region: --- API Handlers
 #[worker::send]
 pub async fn get_key_coolings_handler(
-    State(state): State<crate::AppState>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     _layout: PageLayout,
 ) -> Response {
@@ -1068,12 +1109,12 @@ pub struct PageLayout;
 impl<S> FromRequestParts<S> for PageLayout
 where
     S: Send + Sync,
-    AppState: FromRef<S>,
+    Arc<AppState>: FromRef<S>,
 {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let app_state = AppState::from_ref(state);
+        let app_state = Arc::<AppState>::from_ref(state);
         let cookies = Cookies::from_request_parts(parts, state)
             .await
             .map_err(|rejection| {

@@ -1,8 +1,10 @@
-use crate::{handlers, web, AppState};
+use crate::AppState;
+use crate::{handlers, web};
 use axum::{routing::post, Router};
+use std::sync::Arc;
 use tower_cookies::CookieManagerLayer;
 
-pub fn new() -> Router<AppState> {
+pub fn new() -> Router<Arc<AppState>> {
     Router::new()
         .merge(web::ui_router())
         // All API requests are now handled by the unified `forward` function.
@@ -11,5 +13,3 @@ pub fn new() -> Router<AppState> {
         // Add the cookie manager layer for cookie support
         .layer(CookieManagerLayer::new())
 }
-
-

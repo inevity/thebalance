@@ -23,6 +23,7 @@ pub mod state_do_kv;
 #[cfg(feature = "do_sqlite")]
 pub mod state_do_sqlite;
 
+use std::sync::Arc;
 use tower_service::Service;
 use worker::send::SendWrapper;
 use worker::*;
@@ -46,10 +47,9 @@ fn start() {
         .init();
 }
 
-#[derive(Clone)]
 pub struct AppState {
     pub env: SendWrapper<Env>,
-    // pub env: String,
+    pub ctx: SendWrapper<Context>,
 }
 // #[derive(Clone, Debug)]
 // pub struct DummyAppState {
@@ -63,9 +63,10 @@ pub async fn fetch(
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     console_error_panic_hook::set_once();
-    let app_state = AppState {
+    let app_state = Arc::new(AppState {
         env: SendWrapper::new(env),
-    };
+        ctx: SendWrapper::new(_ctx),
+    });
     let mut router = router::new().with_state(app_state);
     Ok(router.call(req).await?)
 }

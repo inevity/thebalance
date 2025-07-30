@@ -8,7 +8,15 @@ crate-type = ["cdylib"]
 
 [features]
 # By default, we will use the recommended pattern: a Durable Object with its internal SQLite DB.
-default = ["raw_d1", "axumrouter"]
+default = ["raw_d1", "axumrouter", "wait_until"]
+#default = ["raw_d1", "axumrouter", "use_queue"]
+
+# --- Custom Features ---
+# Strategy: Use worker queues for background tasks. Requires a paid plan.
+use_queue = []
+# Strategy: Use ctx.waitUntil for background tasks. Available on all plans.
+wait_until = []
+
 
 # --- Router Features ---
 axumrouter = ["axum", "http", "http-body", "tower-service"]

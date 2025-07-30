@@ -8,6 +8,8 @@
     "pre-dev": "node pre-dev.mjs",
     "db:find": "find .wrangler/state/v3/d1 -name '*.sqlite' | head -1",
     "dev": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087",
+    "dev-queue": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087 -- -v --no-default-features --features 'raw_d1,axumrouter,use_queue'",
+
     "migrate": "DATABASE_URL=sqlite://$(find .wrangler/state/v3/d1/miniflare-D1DatabaseObject -name '*.sqlite' | head -1) geni up",
     "migrate:new": "geni new",
     "migrate:remote": "geni up",

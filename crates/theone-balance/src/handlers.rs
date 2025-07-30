@@ -1,9 +1,15 @@
 //! This module contains the primary request handlers for the worker.
 
 use crate::{
+    d1_storage,
     error_handling::{self, AxumWorkerError, AxumWorkerResponse, ErrorAnalysis},
-    gcp, models::*, queue::StateUpdate, state::strategy::*, util, AppState,
+    gcp, models::*,
+    state::strategy::*,
+    util, AppState,
 };
+#[cfg(feature = "use_queue")]
+use crate::queue::StateUpdate;
+use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -12,7 +18,7 @@ use axum::{
 use js_sys::Date;
 use phf::phf_map;
 use tracing::{error, info};
-use worker::{Env, Response, Result};
+use worker::{Context, Env, Response, Result};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
     "google-ai-studio" => "x-goog-api-key",
@@ -151,7 +157,7 @@ async fn make_gateway_request(
 /// The new unified forwarding function that contains the full routing logic.
 #[worker::send]
 pub async fn forward(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(path): Path<String>,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
@@ -180,6 +186,8 @@ pub async fn forward(
         let (provider, model_name) =
             util::extract_provider_and_model(&body_bytes, &rest_resource)?;
         info!(provider = provider, model = model_name, "Extracted provider and model");
+
+        #[cfg(feature = "use_queue")]
         let queue = env.queue("STATE_UPDATER")?;
 
         // --- 2. Get and Shuffle Active Keys ---
@@ -216,8 +224,22 @@ pub async fn forward(
 
             // --- 4. Tiered Fallback Logic for Embeddings ---
             if rest_resource.starts_with("compat/embeddings") {
-                let res = handle_embeddings_fallback(env, &selected_key, &body_bytes, &model_name, &queue)
-                    .await?;
+                #[cfg(feature = "use_queue")]
+                let res = {
+                    let queue = env.queue("STATE_UPDATER")?;
+                    handle_embeddings_fallback(
+                        env,
+                        &selected_key,
+                        &body_bytes,
+                        &model_name,
+                        Some(&queue),
+                    )
+                    .await?
+                };
+                #[cfg(feature = "wait_until")]
+                let res =
+                    handle_embeddings_fallback(env, &state.ctx, &selected_key, &body_bytes, &model_name)
+                        .await?;
                 return Ok(AxumWorkerResponse(res).into_response());
             }
 
@@ -301,29 +323,59 @@ pub async fn forward(
                 .await
             {
                 ErrorAnalysis::KeyIsInvalid => {
-                    let update = StateUpdate::SetStatus {
-                        key_id: selected_key.id.clone(),
-                        status: ApiKeyStatus::Blocked,
-                    };
-                    queue.send(&update).await?;
                     worker::console_error!(
                         "Key {} is invalid and has been blocked.",
                         selected_key.key
                     );
+                    #[cfg(feature = "use_queue")]
+                    {
+                        let update = StateUpdate::SetStatus {
+                            key_id: selected_key.id.clone(),
+                            status: ApiKeyStatus::Blocked,
+                        };
+                        queue.send(&update).await?;
+                    }
+                    #[cfg(feature = "wait_until")]
+                    {
+                        let env = state.env.clone();
+                        let key_id = selected_key.id.clone();
+                        state.ctx.wait_until(async move {
+                            if let Ok(db) = env.d1("DB") {
+                                let _ = d1_storage::update_status(&db, &key_id, ApiKeyStatus::Blocked)
+                                    .await;
+                            }
+                        });
+                    }
                 }
                 ErrorAnalysis::KeyOnCooldown(duration) => {
-                    let update = StateUpdate::SetCooldown {
-                        key_id: selected_key.id.clone(),
-                        model: model_name.to_string(),
-                        duration_secs: duration.as_secs(),
-                    };
-                    queue.send(&update).await?;
                     worker::console_warn!(
                         "Key {} is cooling down for model {} for {}s.",
                         selected_key.key,
                         &model_name,
                         duration.as_secs()
                     );
+                    #[cfg(feature = "use_queue")]
+                    {
+                        let update = StateUpdate::SetCooldown {
+                            key_id: selected_key.id.clone(),
+                            model: model_name.to_string(),
+                            duration_secs: duration.as_secs(),
+                        };
+                        queue.send(&update).await?;
+                    }
+                    #[cfg(feature = "wait_until")]
+                    {
+                        let env = state.env.clone();
+                        let key_id = selected_key.id.clone();
+                        let model_name = model_name.to_string();
+                        state.ctx.wait_until(async move {
+                            if let Ok(db) = env.d1("DB") {
+                                let _ =
+                                    d1_storage::set_cooldown(&db, &key_id, &model_name, duration.as_secs())
+                                        .await;
+                            }
+                        });
+                    }
                 }
                 ErrorAnalysis::Unknown => {
                     worker::console_error!(
@@ -364,10 +416,11 @@ pub async fn forward(
 /// Handles the specific three-tiered fallback logic for embedding requests.
 async fn handle_embeddings_fallback(
     env: &Env,
+    #[cfg(feature = "wait_until")] ctx: &Context,
     selected_key: &ApiKey,
     body_bytes: &[u8],
     model_name: &str,
-    queue: &worker::Queue,
+    #[cfg(feature = "use_queue")] queue: Option<&worker::Queue>,
 ) -> Result<Response> {
     let is_local_dev = env.var("IS_LOCAL").map(|v| v.to_string() == "true").unwrap_or(false);
 
@@ -377,12 +430,31 @@ async fn handle_embeddings_fallback(
 
     // In local development, we only make one attempt directly to the native API.
     if is_local_dev {
-        match try_native_embeddings_request(
-            selected_key,
-            model_name,
-            &gemini_body_bytes,
-            queue,
-        ).await {
+        let result = {
+            #[cfg(feature = "use_queue")]
+            {
+                let queue = env.queue("STATE_UPDATER")?;
+                try_native_embeddings_request(
+                    selected_key,
+                    model_name,
+                    &gemini_body_bytes,
+                    Some(&queue),
+                )
+                .await
+            }
+            #[cfg(feature = "wait_until")]
+            {
+                try_native_embeddings_request(
+                    ctx,
+                    env,
+                    selected_key,
+                    model_name,
+                    &gemini_body_bytes,
+                )
+                .await
+            }
+        };
+        match result {
             Ok(response) => return Ok(response),
             Err(e) => {
                 // In local dev, return a proper error response instead of propagating the error
@@ -424,20 +496,40 @@ async fn handle_embeddings_fallback(
 
     // --- Attempt 3: Native Google API ---
     // If the gateway fails, we try the native API directly.
-    try_native_embeddings_request(
-        selected_key,
-        model_name,
-        &gemini_body_bytes,
-        queue,
-    ).await
+    {
+        #[cfg(feature = "use_queue")]
+        {
+            let queue = env.queue("STATE_UPDATER")?;
+            try_native_embeddings_request(
+                selected_key,
+                model_name,
+                &gemini_body_bytes,
+                Some(&queue),
+            )
+            .await
+        }
+        #[cfg(feature = "wait_until")]
+        {
+            try_native_embeddings_request(
+                ctx,
+                env,
+                selected_key,
+                model_name,
+                &gemini_body_bytes,
+            )
+            .await
+        }
+    }
 }
 
 /// Helper function for the native Google API part of the embeddings fallback.
 async fn try_native_embeddings_request(
+    #[cfg(feature = "wait_until")] ctx: &Context,
+    #[cfg(feature = "wait_until")] env: &Env,
     selected_key: &ApiKey,
     model_name: &str,
     gemini_body_bytes: &[u8],
-    queue: &worker::Queue,
+    #[cfg(feature = "use_queue")] queue: Option<&worker::Queue>,
 ) -> Result<Response> {
     let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents", model_name);
     let headers = worker::Headers::new();
@@ -463,21 +555,53 @@ async fn try_native_embeddings_request(
     // If the attempt fails, analyze the error to decide whether to block or cool down the key.
     let status = native_resp.status_code();
     let error_body_text = native_resp.text().await?;
-    match error_handling::analyze_error_with_retries("google-ai-studio", status, &error_body_text).await {
-         ErrorAnalysis::KeyIsInvalid => {
-            let update = StateUpdate::SetStatus {
-                key_id: selected_key.id.clone(),
-                status: ApiKeyStatus::Blocked,
-            };
-            queue.send(&update).await?;
+    match error_handling::analyze_error_with_retries("google-ai-studio", status, &error_body_text)
+        .await
+    {
+        ErrorAnalysis::KeyIsInvalid => {
+            #[cfg(feature = "use_queue")]
+            {
+                let update = StateUpdate::SetStatus {
+                    key_id: selected_key.id.clone(),
+                    status: ApiKeyStatus::Blocked,
+                };
+                queue.unwrap().send(&update).await?;
+            }
+            #[cfg(feature = "wait_until")]
+            {
+                let env = env.clone();
+                let key_id = selected_key.id.clone();
+                ctx.wait_until(async move {
+                    if let Ok(db) = env.d1("DB") {
+                        let _ = d1_storage::update_status(&db, &key_id, ApiKeyStatus::Blocked)
+                            .await;
+                    }
+                });
+            }
         }
         ErrorAnalysis::KeyOnCooldown(duration) => {
-             let update = StateUpdate::SetCooldown {
-                key_id: selected_key.id.clone(),
-                model: model_name.to_string(),
-                duration_secs: duration.as_secs(),
-            };
-            queue.send(&update).await?;
+            #[cfg(feature = "use_queue")]
+            {
+                let update = StateUpdate::SetCooldown {
+                    key_id: selected_key.id.clone(),
+                    model: model_name.to_string(),
+                    duration_secs: duration.as_secs(),
+                };
+                queue.unwrap().send(&update).await?;
+            }
+            #[cfg(feature = "wait_until")]
+            {
+                let env = env.clone();
+                let key_id = selected_key.id.clone();
+                let model_name = model_name.to_string();
+                ctx.wait_until(async move {
+                    if let Ok(db) = env.d1("DB") {
+                        let _ =
+                            d1_storage::set_cooldown(&db, &key_id, &model_name, duration.as_secs())
+                                .await;
+                    }
+                });
+            }
         }
         _ => {} // Ignore other errors for now
     }
