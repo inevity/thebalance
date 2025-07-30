@@ -23,25 +23,27 @@ pub mod state_do_kv;
 #[cfg(feature = "do_sqlite")]
 pub mod state_do_sqlite;
 
-use once_cell::sync::Lazy;
 use tower_service::Service;
-use tracing_subscriber::fmt::format::json;
 use worker::send::SendWrapper;
 use worker::*;
 
-static TRACING_INIT: Lazy<()> = Lazy::new(init_tracing);
+use tracing_subscriber::fmt::format::Pretty;
+use tracing_subscriber::fmt::time::UtcTime;
+use tracing_subscriber::prelude::*;
+use tracing_web::{performance_layer, MakeConsoleWriter};
 
-fn init_tracing() {
-    let sub = tracing_subscriber::fmt()
-        .with_writer(
-            tracing_web::MakeConsoleWriter::default()
-                .with_pretty_level()
-                .with_force_json(true),
-        )
+#[event(start)]
+fn start() {
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
-        .finish();
-
-    tracing::subscriber::set_global_default(sub).expect("failed to set global default subscriber");
+        .with_ansi(false) // Only partially supported across JavaScript runtimes
+        .with_timer(UtcTime::rfc_3339()) // std::time is not available in browsers
+        .with_writer(MakeConsoleWriter); // write events to the console
+    let perf_layer = performance_layer().with_details_from_fields(Pretty::default());
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(perf_layer)
+        .init();
 }
 
 #[derive(Clone)]
@@ -61,7 +63,6 @@ pub async fn fetch(
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     console_error_panic_hook::set_once();
-    Lazy::force(&TRACING_INIT);
     let app_state = AppState {
         env: SendWrapper::new(env),
     };
