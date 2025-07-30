@@ -3,4 +3,5 @@ node_modules
 .wrangler
 pnpm-lock.yaml
 Cargo.lock
+wrangler.jsonc
 
