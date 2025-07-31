@@ -17,19 +17,19 @@
             "migrations_dir": "migrations"
         }
     ],
-    "queues": {
-        "producers": [
-            {
-                "queue": "state-updater",
-                "binding": "STATE_UPDATER"
-            }
-        ],
-        "consumers": [
-            {
-                "queue": "state-updater"
-            }
-        ]
-    },
+//    "queues": {
+//        "producers": [
+//            {
+//                "queue": "state-updater",
+//                "binding": "STATE_UPDATER"
+//            }
+//        ],
+//        "consumers": [
+//            {
+//                "queue": "state-updater"
+//            }
+//        ]
+//    },
     "vars": {
         "AUTH_KEY": "my-auth-key",
         "AI_GATEWAY": "one-balance",

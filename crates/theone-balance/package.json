@@ -9,20 +9,22 @@
     "db:find": "find .wrangler/state/v3/d1 -name '*.sqlite' | head -1",
     "dev": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087",
     "dev-queue": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087 -- -v --no-default-features --features 'raw_d1,axumrouter,use_queue'",
-
-    "migrate": "DATABASE_URL=sqlite://$(find .wrangler/state/v3/d1/miniflare-D1DatabaseObject -name '*.sqlite' | head -1) geni up",
-    "migrate:new": "geni new",
-    "migrate:remote": "wrangler exec -- geni up",
+    "migrate": "drizzle-kit generate && wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --local",
+    "migrate:remote": "drizzle-kit generate && wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote",
     "deploy": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy -- --features 'raw_d1,axumrouter,wait_until'",
     "deploy:queue": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy -- --no-default-features --features 'raw_d1,axumrouter,use_queue'",
     "deploy:dry-run": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy --dry-run",
-    "deploy:reset": "pnpm deploy && wrangler d1 execute $(node -p 'require(\"./wrangler.jsonc\").d1_databases[0].database_name') --remote --command \"UPDATE keys SET status = 'active',model_coolings = '{}', total_cooling_seconds = 0;\""
+    "deploy:reset": "pnpm deploy && wrangler d1 execute $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote --command \"UPDATE keys SET status = 'active',model_coolings = '{}', total_cooling_seconds = 0;\""
   },
   "devDependencies": {
     "wrangler": "4.26.1",
+    "drizzle-kit": "^0.31.2",
     "jsonc-parser": "^3.2.0"
   },
-  "dependencies": {},
+  "dependencies": {
+    "drizzle-orm": "^0.44.2"
+
+  },
   "packageManager": "pnpm@10.13.1+sha512.37ebf1a5c7a30d5fabe0c5df44ee8da4c965ca0c5af3dbab28c3a1681b70a256218d05c81c9c0dcf767ef6b8551eb5b960042b9ed4300c59242336377e01cfad"
 }
 

@@ -1,5 +1,6 @@
 import { execSync } from 'child_process'
 import * as fs from 'fs'
+import { parse } from 'jsonc-parser'
 
 function run(command, options = {}) {
     console.log(`> ${command}`)
@@ -37,7 +38,13 @@ function commandExists(command) {
 }
 
 function getWranglerConfig() {
-    return JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf-8'))
+    const configStr = fs.readFileSync('wrangler.jsonc', 'utf-8');
+    try {
+        return parse(configStr);
+    } catch (e) {
+        console.error("Failed to parse wrangler.jsonc. Please ensure it is a valid JSONC file.", e);
+        process.exit(1);
+    }
 }
 
 async function main() {
