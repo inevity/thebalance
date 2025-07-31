@@ -8,14 +8,25 @@ crate-type = ["cdylib"]
 
 [features]
 # By default, we will use the recommended pattern: a Durable Object with its internal SQLite DB.
-default = ["raw_d1", "axumrouter", "wait_until"]
+default = ["raw_d1", "axumrouter", "wait_until", "tracing-worker"]
+# default = ["sync_cli"]
 #default = ["raw_d1", "axumrouter", "use_queue"]
 
 # --- Custom Features ---
-# Strategy: Use worker queues for background tasks. Requires a paid plan.
-use_queue = []
 # Strategy: Use ctx.waitUntil for background tasks. Available on all plans.
 wait_until = []
+# Strategy: Use worker queues for background tasks. Requires a paid plan.
+use_queue = []
+#cargo build --no-default-features --bin sync-cli --features sync_cli
+tracing-worker = ["tracing-subscriber/time"]
+tracing-cli = ["tracing-subscriber/env-filter"]
+sync_cli = [
+    "clap",
+    "tokio",
+    "reqwest",
+    "tracing-cli",
+]
+
 
 
 # --- Router Features ---
@@ -51,7 +62,7 @@ thiserror = "2.0"
 # Logging and Debugging
 tracing = "0.1"
 tracing-web = "0.1"
-tracing-subscriber = { version = "0.3", features = ["time", "json"] }
+tracing-subscriber = { version = "0.3", features = ["json"], optional = true }
 console_error_panic_hook = "0.1.7"
 
 # Utilities
@@ -82,6 +93,18 @@ time = { version = "0.3", features = ['wasm-bindgen'] }
 toasty = { path = "../toasty/crates/toasty", features = ["serde"] }
 toasty-core = { path = "../toasty/crates/toasty-core" }
 toasty-sql = { path = "../toasty/crates/toasty-sql" }
+
+# Dependencies for the sync_cli binary
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+[[bin]]
+name = "sync-cli"
+path = "src/bin/sync_cli.rs"
+required-features = ["sync_cli"]
+
+
 
 
 
