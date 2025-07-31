@@ -1,7 +1,6 @@
 //! This module contains all UI-related logic, including Axum handlers and Maud templates.
 
 use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
-use std::sync::Arc;
 use axum::{
     extract::{Form, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
@@ -13,6 +12,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use phf::phf_map;
 use serde::{Deserialize, Deserializer};
 use std::fmt;
+use std::sync::Arc;
 use time::Duration;
 use tower_cookies::{Cookie, Cookies};
 
@@ -419,8 +419,8 @@ fn page_layout(content: Markup) -> Markup {
                 }
                 footer class="text-center py-12 text-sm text-gray-600 space-y-3" {
                     p {
-                        a href="https://github.com/glidea/one-balance" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 transition-colors duration-300 font-medium" {
-                            "one-balance on GitHub"
+                        a href="https://github.com/inevity/theone" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 transition-colors duration-300 font-medium" {
+                            "THEONE on GitHub"
                         }
                     }
                     p {
@@ -711,7 +711,7 @@ fn build_key_rows(keys: Vec<ApiKey>) -> Markup {
                 }
                 td class="p-4" {
                     span class="text-sm text-slate-800 cursor-pointer hover:text-blue-700 transition-colors duration-200 font-medium px-2 py-1 rounded-md hover:bg-blue-100/80 backdrop-blur-sm"
-                          title="Click to view model cooling details" 
+                          title="Click to view model cooling details"
                           onclick=(format!("showModelCoolings('{}', '{}')", k.id, k.key)) { (format_cooling_time(k.total_cooling_seconds)) }
                 }
                 td class="p-4 text-sm text-slate-700 font-medium" { (format_used_time(k.created_at)) }
