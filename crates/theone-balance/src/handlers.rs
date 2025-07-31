@@ -101,6 +101,12 @@ async fn make_gateway_request(
     key: &str,
     request_id: &str,
 ) -> Result<worker::Request> {
+    //let ai_gateway = env.ai("AI")?;
+    //let result = ai_gateway.run(
+    //    "@cf/meta/llama-2-7b-chat-int8",
+    //    serde_json::json!({ "prompt": "What is the origin of the phrase 'hello world'?" })
+    //).await?;
+
     let mut new_headers = worker::Headers::new();
     for (k, v) in headers {
         if let Ok(v_str) = v.to_str() {
