@@ -38,6 +38,10 @@
         "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false"
 
+    },
+    "observability": {
+      "enabled": true,
+      "head_sampling_rate": 1
     }
 
 }
