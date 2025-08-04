@@ -90,7 +90,7 @@ time = { version = "0.3", features = ['wasm-bindgen'] }
 
 
 
-toasty = { path = "../toasty/crates/toasty", features = ["serde"] }
+toasty = { path = "../toasty/crates/toasty", features = ["serde", "hybrid-builder"] }
 toasty-core = { path = "../toasty/crates/toasty-core" }
 toasty-sql = { path = "../toasty/crates/toasty-sql" }
 
@@ -98,6 +98,7 @@ toasty-sql = { path = "../toasty/crates/toasty-sql" }
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
+
 
 [[bin]]
 name = "sync-cli"
@@ -114,8 +115,12 @@ required-features = ["sync_cli"]
 lto = true
 strip = true
 opt-level = "s"
+# [profile.release]
+# debug = true
+# strip = false
 
 # [package.metadata.wasm-pack.profile.release]
 # wasm-opt = false
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
