@@ -4,6 +4,7 @@
     "main": "build/worker/shim.mjs",
     "compatibility_date": "2025-07-21",
     "build": {
+        // "command": "RUST_BACKTRACE=1 cargo install -q worker-build && worker-build --release"
         "command": "cargo install -q worker-build && worker-build --release"
     },
     "ai": {
