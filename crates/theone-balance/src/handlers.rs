@@ -60,7 +60,7 @@ enum RequestResult {
     },
 }
 
-#[instrument(skip(req), fields(provider))]
+#[instrument(skip(req), fields(provider, retry_attempt = tracing::field::Empty))]
 async fn execute_request_with_retry(
     req: worker::Request,
     provider: &str,
