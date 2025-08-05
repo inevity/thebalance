@@ -296,7 +296,6 @@ pub async fn post_keys_list_handler(
     let pairs: Vec<(String, String)> = match serde_urlencoded::from_bytes(&body) {
         Ok(pairs) => pairs,
         Err(e) => {
-            worker::console_log!("Failed to deserialize form body into pairs: {}", e);
             warn!("Failed to deserialize form body into pairs: {}", e);
             return (
                 StatusCode::BAD_REQUEST,

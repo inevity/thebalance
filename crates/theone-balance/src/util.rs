@@ -71,3 +71,12 @@ pub fn extract_provider_and_model(
 pub fn shuffle_keys<T>(keys: &mut [T]) {
     keys.shuffle(&mut rand::rng());
 }
+
+/// Redacts the middle of a key for safe logging.
+pub fn partially_redact_key(key: &str) -> String {
+    if key.len() < 8 {
+        return "key-too-short".to_string();
+    }
+    let len = key.len();
+    format!("{}...{}", &key[..4], &key[len-4..])
+}

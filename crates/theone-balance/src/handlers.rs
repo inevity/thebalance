@@ -17,7 +17,7 @@ use axum::{
 };
 use js_sys::Date;
 use phf::phf_map;
-use tracing::{error, info};
+use tracing::{error, info, instrument, span, warn, Level};
 use worker::{Context, Env, Response, Result, Delay};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
@@ -60,49 +60,69 @@ enum RequestResult {
     },
 }
 
+#[instrument(skip(req), fields(provider))]
 async fn execute_request_with_retry(
     req: worker::Request,
     provider: &str,
     max_attempts: u32,
 ) -> Result<RequestResult> {
     let mut attempt = 0;
-    
     loop {
         attempt += 1;
         let req_clone = req.clone()?;
-        info!(attempt = attempt, url = req_clone.url()?.to_string(), "Attempting to send request to provider");
-        let mut resp = match worker::Fetch::Request(req_clone).send().await {
-            Ok(r) => r,
+        info!(attempt, url = %req_clone.url()?, "Attempting to send request to provider");
+
+        match worker::Fetch::Request(req_clone).send().await {
+            Ok(mut resp) => {
+                let status = resp.status_code();
+                if status == 200 {
+                    return Ok(RequestResult::Success(resp));
+                }
+
+                let error_body_text = resp.text().await?;
+                let analysis = error_handling::analyze_provider_error(provider, status, &error_body_text).await;
+
+                if let ErrorAnalysis::TransientServerError = analysis {
+                     if attempt < max_attempts {
+                        warn!(attempt, status, "Request failed with transient server error, retrying...");
+                    } else {
+                        warn!(attempt, status, "Request failed with transient server error after max attempts");
+                        return Ok(RequestResult::Failure {
+                            analysis,
+                            body_text: error_body_text,
+                            status,
+                        });
+                    }
+                } else {
+                     // Non-transient error, return immediately
+                    return Ok(RequestResult::Failure {
+                        analysis,
+                        body_text: error_body_text,
+                        status,
+                    });
+                }
+            }
             Err(e) => {
-                error!(error = e.to_string(), "Fetch failed inside execute_request_with_retry");
-                return Err(e);
+                if attempt < max_attempts {
+                    warn!(attempt, error = %e, "Request failed with network error, retrying...");
+                } else {
+                    warn!(attempt, error = %e, "Request failed with network error after max attempts");
+                    // We must return a RequestResult::Failure here so the key failover loop can continue.
+                    // Re-classifying the worker::Error into our enum.
+                    return Ok(RequestResult::Failure {
+                        analysis: ErrorAnalysis::TransientServerError,
+                        body_text: e.to_string(),
+                        status: 504, // Gateway Timeout is a reasonable proxy for a network error
+                    });
+                }
             }
         };
-        let status = resp.status_code();
-        
-        if status == 200 {
-            return Ok(RequestResult::Success(resp));
-        }
 
-        let error_body_text = resp.text().await?;
-        let analysis = error_handling::analyze_provider_error(provider, status, &error_body_text).await;
-
-        if let ErrorAnalysis::TransientServerError = analysis {
-            if attempt < max_attempts {
-                let delay = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
-                let jitter = std::time::Duration::from_millis(rand::random::<u64>() % 100);
-                let delay_duration = delay + jitter;
-                Delay::from(delay_duration).await;
-                continue;
-            }
-        }
-        
-        // Any other error (or max retries reached) is a failure for this key.
-        return Ok(RequestResult::Failure {
-            analysis,
-            body_text: error_body_text,
-            status,
-        });
+        // If we've reached here, it's a retryable error. Calculate delay and continue.
+        let delay = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
+        let jitter = std::time::Duration::from_millis(rand::random::<u64>() % 100);
+        let delay_duration = delay + jitter;
+        Delay::from(delay_duration).await;
     }
 }
 
@@ -217,6 +237,7 @@ async fn make_gateway_request(
 
 
 /// The new unified forwarding function that contains the full routing logic.
+#[instrument(skip_all, fields(request_id = %uuid::Uuid::new_v4()))]
 #[worker::send]
 pub async fn forward(
     State(state): State<Arc<AppState>>,
@@ -282,11 +303,14 @@ pub async fn forward(
         let mut last_error_was_cooldown = false;
 
         for selected_key in sorted_keys {
+            let key_span = span!(Level::INFO, "key_failover", key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
+            let _enter = key_span.enter();
+
             let now = (Date::now() / 1000.0) as u64;
             // Check for model-specific cooldowns
             if let Some(cooldown_end) = selected_key.get_cooldown_end(&model_name) {
                 if now < cooldown_end {
-                    worker::console_warn!(
+                    warn!(
                         "Key {} is on cooldown for model {}, skipping.",
                         selected_key.key,
                         &model_name
@@ -406,7 +430,7 @@ pub async fn forward(
                                 latency,
                             );
                             if let Err(e) = update_future.await {
-                                worker::console_error!("Failed to update key metrics on success: {}", e);
+                                error!("Failed to update key metrics on success: {}", e);
                             }
                         }
                     });
@@ -438,7 +462,7 @@ pub async fn forward(
                     body_text,
                     status,
                 } => {
-                    error!(key_id = selected_key.id, status, error_body = body_text, "Request failed for key");
+                    warn!(key_id = selected_key.id, status, error_body = body_text, "Request failed for key, trying next.");
                     last_error_body = body_text;
                     last_error_status = status;
                     last_error_was_cooldown = matches!(analysis, ErrorAnalysis::KeyOnCooldown(_));
@@ -456,7 +480,7 @@ pub async fn forward(
                                 latency,
                             );
                             if let Err(e) = update_future.await {
-                                worker::console_error!("Failed to update key metrics on failure: {}", e);
+                                error!("Failed to update key metrics on failure: {}", e);
                             }
                         }
                     });
@@ -474,7 +498,7 @@ pub async fn forward(
                                         ApiKeyStatus::Blocked,
                                     );
                                     if let Err(e) = fut.await {
-                                        worker::console_error!("Failed to set key status to Blocked: {}", e);
+                                        error!("Failed to set key status to Blocked: {}", e);
                                     }
                                 }
                             });
@@ -489,7 +513,7 @@ pub async fn forward(
                                 if let Ok(db) = state_clone.env.d1("DB") {
                                     let fut = d1_storage::set_key_model_cooldown_if_available(&db, &key_id, &provider, &model_name, duration.as_secs());
                                     if let Err(e) = fut.await {
-                                        worker::console_error!("Failed to set key cooldown: {}", e);
+                                        error!("Failed to set key cooldown: {}", e);
                                     }
                                 }
                              });

@@ -38,7 +38,7 @@ use tracing_web::{performance_layer, MakeConsoleWriter};
 #[event(start)]
 fn start() {
     let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
+        .pretty()
         .with_ansi(false) // Only partially supported across JavaScript runtimes
         .with_timer(UtcTime::rfc_3339()) // std::time is not available in browsers
         .with_writer(MakeConsoleWriter); // write events to the console
