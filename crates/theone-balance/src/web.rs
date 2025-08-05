@@ -17,6 +17,8 @@ use std::fmt;
 use std::sync::Arc;
 use time::Duration;
 use tower_cookies::{Cookie, Cookies};
+use tracing::{error, info, warn};
+
 
 // --- Constants for Providers ---
 
@@ -295,6 +297,7 @@ pub async fn post_keys_list_handler(
         Ok(pairs) => pairs,
         Err(e) => {
             worker::console_log!("Failed to deserialize form body into pairs: {}", e);
+            warn!("Failed to deserialize form body into pairs: {}", e);
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to deserialize form body into pairs: {}", e),
@@ -318,7 +321,7 @@ pub async fn post_keys_list_handler(
 
     if action.is_empty() {
         let error_message = "Form is missing 'action' field".to_string();
-        worker::console_log!("{}", &error_message);
+        error!("{}", &error_message);
         return (StatusCode::BAD_REQUEST, error_message).into_response();
     }
 
@@ -327,7 +330,7 @@ pub async fn post_keys_list_handler(
         keys,
         key_id,
     };
-    worker::console_log!("Form data: {:?}", form);
+    info!("Form data: {:?}", form);
     if form.action == "add" {
         if let Some(keys_str) = form.keys {
             let db = state.env.d1("DB").unwrap();

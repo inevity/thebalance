@@ -1,5 +1,6 @@
 use crate::state::strategy::ApiKeyStatus;
 use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 use worker::{event, Env, MessageExt, Result, Stub};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -69,7 +70,7 @@ pub async fn main(
     let db = env.d1("DB")?;
 
     for message in batch.messages()? {
-        worker::console_log!("Processing state update: {:?}", message.body());
+        info!("Processing state update: {:?}", message.body());
         let res = match message.body() {
             StateUpdate::SetStatus { key_id, status } => {
                 #[cfg(feature = "raw_d1")]
@@ -98,7 +99,7 @@ pub async fn main(
         };
 
         if let Err(e) = res {
-            worker::console_error!("Failed to process state update {:?}: {}", message.body(), e);
+            error!("Failed to process state update {:?}: {}", message.body(), e);
             message.retry();
         } else {
             message.ack();

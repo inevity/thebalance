@@ -3,6 +3,7 @@
 use crate::{d1_storage, request, AppState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{error, info};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TestResult {
@@ -28,7 +29,7 @@ pub async fn test_keys(
     provider: &str,
     key_ids: Vec<String>,
 ) -> worker::Result<Vec<TestResult>> {
-    worker::console_log!("Testing {} keys for provider {}", key_ids.len(), provider);
+    info!("Testing {} keys for provider {}", key_ids.len(), provider);
     let db = state.env.d1("DB")?;
 
     let keys_to_test = d1_storage::get_keys_by_ids(&db, key_ids)
@@ -37,13 +38,13 @@ pub async fn test_keys(
     let mut results = Vec::new();
 
     for key in keys_to_test {
-        worker::console_log!("Testing key: {} for provider {}", key.key, provider);
+        info!("Testing key: {} for provider {}", key.key, provider);
         
         let test_result = test_single_key(provider, &key.key, "gemini-2.5-pro").await;
 
         let result = match test_result {
             Ok(_) => {
-                worker::console_log!("Key {} passed test.", key.key);
+                info!("Key {} passed test.", key.key);
                 TestResult {
                     key: key.key,
                     passed: true,
@@ -51,7 +52,7 @@ pub async fn test_keys(
                 }
             }
             Err(e) => {
-                worker::console_error!("Key {} failed test: {}", key.key, e.to_string());
+                error!("Key {} failed test: {}", key.key, e.to_string());
                 TestResult {
                     key: key.key,
                     passed: false,

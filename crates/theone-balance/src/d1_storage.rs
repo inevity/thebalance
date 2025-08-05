@@ -15,6 +15,8 @@ use worker::D1Database;
 use toasty::Error as ToastyError;
 use std::result::Result as StdResult;
 use thiserror::Error;
+use tracing::info;
+
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -300,7 +302,7 @@ pub async fn list_active_keys_via_cache(db: &D1Database, provider: &str) -> StdR
         );
     });
 
-    worker::console_log!("cache refreshed for {}: {} keys", provider, keys.len());
+    info!("cache refreshed for {}: {} keys", provider, keys.len());
     Ok(keys)
 }
 
@@ -343,7 +345,7 @@ pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) 
         );
     });
     
-    worker::console_log!("cache refreshed for {}: {} keys", provider, keys.len());
+    info!("cache refreshed for {}: {} keys", provider, keys.len());
     Ok(keys)
 }
 
