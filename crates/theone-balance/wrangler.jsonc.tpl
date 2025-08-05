@@ -1,6 +1,10 @@
 {
+    //This wrangler is for worker delopy, so the config below is for worker. 
     "$schema": "https://developers.cloudflare.com/workers/wrangler/wrangler-schema.json",
-    "name": "theone",
+    // worker name, we keep aigateway-name same as the worker name. so when
+    // deploy, must set AI_GATEWAY=test. here. But in fact, the name can be
+    // diffrent.
+    "name": "test",
     "main": "build/worker/shim.mjs",
     "compatibility_date": "2025-07-21",
     "build": {
@@ -13,7 +17,7 @@
     "d1_databases": [
         {
             "binding": "DB",
-            "database_name": "llm",
+            "database_name": "llmtest",
             "database_id": "xfefef",
             "migrations_dir": "migrations"
         }
@@ -33,6 +37,7 @@
 //    },
     "vars": {
         "AUTH_KEY": "my-auth-key",
+        //AI bind: Ai gateway name 
         "AI_GATEWAY": "aigateway-name",
         "CLOUDFLARE_API_TOKEN": "xxxxx",
         "CLOUDFLARE_ACCOUNT_ID": "xxxx",
