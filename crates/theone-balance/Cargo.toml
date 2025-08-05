@@ -18,7 +18,7 @@ wait_until = []
 # Strategy: Use worker queues for background tasks. Requires a paid plan.
 use_queue = []
 #cargo build --no-default-features --bin sync-cli --features sync_cli
-tracing-worker = ["tracing-subscriber/time"]
+tracing-worker = ["tracing-subscriber/time","tracing-subscriber/env-filter"]
 tracing-cli = ["tracing-subscriber/env-filter"]
 sync_cli = [
     "clap",

@@ -42,7 +42,9 @@
         "CLOUDFLARE_API_TOKEN": "xxxxx",
         "CLOUDFLARE_ACCOUNT_ID": "xxxx",
         "AI_GATEWAY_TOKEN": "xxxx",
-        "IS_LOCAL": "false"
+        "IS_LOCAL": "false",
+        "RUST_LOG": "warn"
+
 
     },
     "observability": {
