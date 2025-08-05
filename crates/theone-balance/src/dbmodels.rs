@@ -27,6 +27,18 @@ pub struct Key {
     pub created_at: i64,
     #[index]
     pub updated_at: i64,
+
+    // Health Metrics
+    #[index]
+    pub latency_ms: i64,
+    #[index]
+    pub success_rate: i64,
+    #[index]
+    pub consecutive_failures: i64,
+    #[index]
+    pub last_checked_at: i64,
+    #[index]
+    pub last_succeeded_at: i64,
 }
 
 

@@ -2,7 +2,7 @@
 //! and the native Google Gemini models, primarily for the embeddings endpoint
 //! which requires a direct provider call.
 
-use crate::models::{
+pub use crate::models::{
     EmbeddingInput, GeminiContent, GeminiEmbeddingContent, GeminiEmbeddingsRequest, GeminiEmbeddingsResponse, GeminiPart,
     OpenAiEmbedding, OpenAiEmbeddingsRequest, OpenAiEmbeddingsResponse, OpenAiUsage,
     OpenAiChatCompletionRequest, GeminiChatRequest, GeminiChatResponse, OpenAiChatCompletionResponse,

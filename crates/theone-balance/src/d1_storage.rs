@@ -66,6 +66,12 @@ fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
         total_cooling_seconds: db_key.total_cooling_seconds as u64,
         created_at: db_key.created_at as u64,
         updated_at: db_key.updated_at as u64,
+        latency_ms: db_key.latency_ms,
+        // success_rate is stored as i64 (scaled by 1000), so we convert it to f64 for ApiKey
+        success_rate: db_key.success_rate as f64 / 1000.0,
+        consecutive_failures: db_key.consecutive_failures,
+        last_checked_at: db_key.last_checked_at as u64,
+        last_succeeded_at: db_key.last_succeeded_at as u64,
     }
 }
 
@@ -163,7 +169,12 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdRes
             .model_coolings("{}".to_string())
             .total_cooling_seconds(0)
             .created_at(now)
-            .updated_at(now);
+            .updated_at(now)
+            .latency_ms(0)
+            .success_rate(1000)
+            .consecutive_failures(0)
+            .last_checked_at(0)
+            .last_succeeded_at(0);
         
         executor.exec_insert(insert.into_insert()).await?;
     }
@@ -207,6 +218,23 @@ pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> StdResult<Option
     }
 }
 
+pub async fn get_keys_by_ids(db: &D1Database, ids: Vec<String>) -> StdResult<Vec<ApiKey>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let executor = get_executor(db);
+
+    // Use filter with in_set for multiple IDs
+    let query = DbKey::filter(DbKey::FIELDS.id.in_set(ids));
+
+    let db_keys = executor.exec_query(query).await?;
+
+    let api_keys: Vec<ApiKey> = db_keys.into_iter().map(db_key_to_api_key).collect();
+
+    Ok(api_keys)
+}
+
+
 pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
     if provider.is_empty() {
         return Err(StorageError::Worker(worker::Error::from("Provider not specified")));
@@ -239,6 +267,45 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
 
 pub async fn list_active_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
     let now = Date::now() / 1000.0;
+
+    let needs_refresh = ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+        let cache_map = cache.borrow();
+        if let Some(cache_entry) = cache_map.get(provider) {
+            now - cache_entry.updated_at >= CACHE_MAX_AGE_SECONDS || cache_entry.is_dirty
+        } else {
+            true
+        }
+    });
+
+    if !needs_refresh {
+        return Ok(ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+            cache.borrow()
+                .get(provider)
+                .map(|entry| entry.data.clone())
+                .unwrap_or_else(Vec::new)
+        }));
+    }
+
+    let keys = get_active_keys(db, provider).await?;
+
+    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
+        let mut cache_map = cache.borrow_mut();
+        cache_map.insert(
+            provider.to_string(),
+            Cache {
+                data: keys.clone(),
+                updated_at: now,
+                is_dirty: false,
+            },
+        );
+    });
+
+    worker::console_log!("cache refreshed for {}: {} keys", provider, keys.len());
+    Ok(keys)
+}
+
+pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
+    let now = Date::now() / 1000.0;
     
     // Check if we have a valid cache entry
     let needs_refresh = ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
@@ -260,8 +327,8 @@ pub async fn list_active_keys_via_cache(db: &D1Database, provider: &str) -> StdR
         }));
     }
     
-    // Cache miss or expired, fetch from database
-    let keys = get_active_keys(db, provider).await?;
+    // Cache miss or expired, fetch from database and sort by health
+    let keys = get_healthy_sorted_keys(db, provider).await?;
     
     // Update cache
     ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
@@ -404,4 +471,84 @@ pub async fn set_key_model_cooldown_if_available(
     } else {
         Ok(false)
     }
+}
+async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
+    let mut active_keys: Vec<ApiKey> = get_active_keys(db, provider).await?
+        .into_iter()
+        .filter(|key| key.consecutive_failures < 5) // Circuit breaker
+        .collect();
+
+    if active_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let now = (Date::now() / 1000.0) as u64;
+    
+    // Define a helper closure to calculate score
+    let calculate_health_score = |key: &ApiKey| -> i64 {
+        // Lower latency is better, higher success rate is better.
+        let latency_score = 10000 - key.latency_ms; 
+        // key.success_rate is a float between 0.0 and 1.0. Scale it for the score.
+        let success_score = (key.success_rate * 1000.0) as i64;
+        
+        // Penalize consecutive failures heavily.
+        let failure_penalty = key.consecutive_failures * 50;
+        
+        // Add a small bonus for recently successful keys to break ties.
+        let recent_success_bonus = if now.saturating_sub(key.last_succeeded_at) < 300 { 10 } else { 0 };
+        
+        latency_score + success_score - failure_penalty + recent_success_bonus
+    };
+
+    // Sort by the health score, descending.
+    active_keys.sort_by(|a, b| {
+        let score_b = calculate_health_score(b);
+        let score_a = calculate_health_score(a);
+        score_b.cmp(&score_a)
+    });
+
+    Ok(active_keys)
+}
+
+pub async fn update_key_metrics(
+    db: &D1Database,
+    key_id: &str,
+    is_success: bool,
+    latency: i64,
+) -> StdResult<(), StorageError> {
+    let executor = get_executor(db);
+    let key_result = executor.exec_first(DbKey::filter_by_id(key_id.to_string())).await?;
+
+    if let Some(mut key) = key_result {
+        let now = (Date::now() / 1000.0) as i64;
+        let new_latency = latency;
+        let new_last_checked_at = now;
+        
+        let (new_consecutive_failures, new_success_rate, new_last_succeeded_at) = if is_success {
+            // Recalculate success rate using a simple moving average.
+            // We scale by 1000, so 1.0 is 1000.
+            let new_success_rate = (key.success_rate * 99 + 1000) / 100;
+            (0, new_success_rate, now)
+        } else {
+            let new_failures = key.consecutive_failures + 1;
+            // Penalize success rate on failure.
+            let new_success_rate = (key.success_rate * 99) / 100;
+            (new_failures, new_success_rate, key.last_succeeded_at)
+        };
+
+        let update_query = DbKey::filter_by_id(key_id.to_string())
+            .update()
+            .latency_ms(new_latency)
+            .success_rate(new_success_rate)
+            .consecutive_failures(new_consecutive_failures)
+            .last_checked_at(new_last_checked_at)
+            .last_succeeded_at(new_last_succeeded_at)
+            .updated_at(now);
+        
+        executor.exec_update(update_query.stmt).await?;
+        
+        mark_provider_cache_dirty(&key.provider);
+    }
+
+    Ok(())
 }

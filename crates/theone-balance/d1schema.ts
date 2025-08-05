@@ -21,7 +21,12 @@ export const keys = sqlite.sqliteTable(
         updatedAt: sqlite
             .integer('updated_at', { mode: 'timestamp' })
             .notNull()
-            .default(drizzle.sql`(strftime('%s', 'now'))`)
+            .default(drizzle.sql`(strftime('%s', 'now'))`),
+        latencyMs: sqlite.integer('latency_ms').notNull().default(0),
+        successRate: sqlite.integer('success_rate').notNull().default(1000),
+        consecutiveFailures: sqlite.integer('consecutive_failures').notNull().default(0),
+        lastCheckedAt: sqlite.integer('last_checked_at', { mode: 'timestamp' }).notNull().default(0),
+        lastSucceededAt: sqlite.integer('last_succeeded_at', { mode: 'timestamp' }).notNull().default(0),
     },
     table => {
         return {

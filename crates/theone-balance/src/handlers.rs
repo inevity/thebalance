@@ -18,7 +18,7 @@ use axum::{
 use js_sys::Date;
 use phf::phf_map;
 use tracing::{error, info};
-use worker::{Context, Env, Response, Result};
+use worker::{Context, Env, Response, Result, Delay};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
     "google-ai-studio" => "x-goog-api-key",
@@ -50,6 +50,62 @@ fn create_openai_error_response(
 }
 
 // A helper to get the Durable Object stub for the API Key Manager.
+
+enum RequestResult {
+    Success(Response),
+    Failure {
+        analysis: ErrorAnalysis,
+        body_text: String,
+        status: u16,
+    },
+}
+
+async fn execute_request_with_retry(
+    req: worker::Request,
+    provider: &str,
+    max_attempts: u32,
+) -> Result<RequestResult> {
+    let mut attempt = 0;
+    
+    loop {
+        attempt += 1;
+        let req_clone = req.clone()?;
+        info!(attempt = attempt, url = req_clone.url()?.to_string(), "Attempting to send request to provider");
+        let mut resp = match worker::Fetch::Request(req_clone).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(error = e.to_string(), "Fetch failed inside execute_request_with_retry");
+                return Err(e);
+            }
+        };
+        let status = resp.status_code();
+        
+        if status == 200 {
+            return Ok(RequestResult::Success(resp));
+        }
+
+        let error_body_text = resp.text().await?;
+        let analysis = error_handling::analyze_provider_error(provider, status, &error_body_text).await;
+
+        if let ErrorAnalysis::TransientServerError = analysis {
+            if attempt < max_attempts {
+                let delay = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
+                let jitter = std::time::Duration::from_millis(rand::random::<u64>() % 100);
+                let delay_duration = delay + jitter;
+                Delay::from(delay_duration).await;
+                continue;
+            }
+        }
+        
+        // Any other error (or max retries reached) is a failure for this key.
+        return Ok(RequestResult::Failure {
+            analysis,
+            body_text: error_body_text,
+            status,
+        });
+    }
+}
+
 #[cfg(not(feature = "raw_d1"))]
 fn get_do_stub(env: &Env) -> Result<worker::Stub> {
     let namespace = env.durable_object("API_KEY_MANAGER")?;
@@ -184,7 +240,11 @@ pub async fn forward(
             .into_response());
         }
 
-        let body_bytes: Bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+        let (parts, body) = req.into_parts();
+        let method = parts.method.clone();
+        let headers = parts.headers.clone();
+
+        let body_bytes: Bytes = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(|e| worker::Error::from(e.to_string()))?;
         let body_bytes = body_bytes.to_vec();
@@ -196,8 +256,13 @@ pub async fn forward(
         #[cfg(feature = "use_queue")]
         let queue = env.queue("STATE_UPDATER")?;
 
-        // --- 2. Get and Shuffle Active Keys ---
-        let active_keys = match get_active_keys(&provider, env).await {
+        // --- 2. Get and Sort Active Keys by Health ---
+        let sorted_keys = match d1_storage::get_healthy_sorted_keys_via_cache(
+            &env.d1("DB")?,
+            &provider,
+        )
+        .await
+        {
             Ok(keys) if !keys.is_empty() => keys,
             _ => {
                 error!(provider = provider, "No active keys available for provider.");
@@ -207,16 +272,18 @@ pub async fn forward(
                     "no_keys_available",
                     503,
                 )
-                .into_response())
+                .into_response());
             }
         };
 
-        let mut shuffled_keys = active_keys;
-        util::shuffle_keys(&mut shuffled_keys);
+        // --- 3. Iterate Through Keys and Attempt Requests (Failover Loop) ---
+        let mut last_error_body = "No active keys were available or all attempts failed.".to_string();
+        let mut last_error_status = 503;
+        let mut last_error_was_cooldown = false;
 
-        // --- 3. Iterate Through Keys and Attempt Requests ---
-        for selected_key in shuffled_keys {
+        for selected_key in sorted_keys {
             let now = (Date::now() / 1000.0) as u64;
+            // Check for model-specific cooldowns
             if let Some(cooldown_end) = selected_key.get_cooldown_end(&model_name) {
                 if now < cooldown_end {
                     worker::console_warn!(
@@ -228,187 +295,247 @@ pub async fn forward(
                 }
             }
 
-            // --- 4. Tiered Fallback Logic for Embeddings ---
-            if rest_resource.starts_with("compat/embeddings") {
-                #[cfg(feature = "use_queue")]
-                let res = {
-                    let queue = env.queue("STATE_UPDATER")?;
-                    handle_embeddings_fallback(
-                        env,
-                        &selected_key,
-                        &body_bytes,
-                        &model_name,
-                        Some(&queue),
-                    )
-                    .await?
-                };
-                #[cfg(feature = "wait_until")]
-                let res =
-                    handle_embeddings_fallback(env, &state.ctx, &selected_key, &body_bytes, &model_name)
-                        .await?;
-                return Ok(AxumWorkerResponse(res).into_response());
-            }
+            let start_time = Date::now();
 
-            // --- 5. Standard AI Gateway Request for all other endpoints ---
+            // --- 4. Construct Request based on Environment and Path ---
             let is_local_dev = env
                 .var("IS_LOCAL")
                 .map(|v| v.to_string() == "true")
                 .unwrap_or(false);
 
-            let final_req = if is_local_dev {
-                // In local dev, proxy directly to the native provider endpoint.
-                if provider != "google-ai-studio" {
-                    return Ok(create_openai_error_response(
-                        "Local dev proxy only supports google-ai-studio",
-                        "server_error",
-                        "not_supported",
-                        501,
-                    )
-                    .into_response());
-                }
-                
-                let mut new_headers = worker::Headers::new();
-                set_auth_header(&mut new_headers, &provider, &selected_key.key)?;
+                        let (request_to_execute, needs_embeddings_resp_translation, needs_chat_resp_translation) = if is_local_dev {
+                // --- LOCAL DEVELOPMENT PATH ---
+                if rest_resource.starts_with("compat/embeddings") {
+                    // 1. LOCAL OpenAI Embeddings -> Native Gemini Endpoint
+                    let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(&body_bytes)?;
+                    let gemini_req_body = gcp::translate_embeddings_request(openapi_req, &model_name);
+                    let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
+                    let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents", model_name);
 
-                let mut req_init = worker::RequestInit::new();
-                req_init.with_method(worker::Method::Post).with_headers(new_headers);
+                    let mut headers = worker::Headers::new();
+                    headers.set("Content-Type", "application/json")?;
+                    headers.set("x-goog-api-key", &selected_key.key)?;
+                    let mut req_init = worker::RequestInit::new();
+                    req_init
+                        .with_method(worker::Method::Post)
+                        .with_headers(headers)
+                        .with_body(Some(gemini_body_bytes.into()));
+                    (worker::Request::new_with_init(&native_endpoint, &req_init)?, true, false)
 
-                let url = if rest_resource.starts_with("compat/chat/completions") {
-                    let openapi_req: OpenAiChatCompletionRequest =
-                        serde_json::from_slice(&body_bytes)?;
-                    let gemini_req_body = gcp::translate_chat_request(openapi_req);
-                    req_init.with_body(Some(serde_json::to_vec(&gemini_req_body)?.into()));
-                    format!(
-                        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                        model_name
-                    )
+                } else if rest_resource.starts_with("compat/chat/completions") {
+                    // 2. LOCAL OpenAI Chat -> Native Gemini Endpoint
+                    let openapi_req: OpenAiChatCompletionRequest = serde_json::from_slice(&body_bytes)?;
+                    let gemini_req = gcp::translate_chat_request(openapi_req);
+                    let gemini_body_bytes = serde_json::to_vec(&gemini_req)?;
+                    let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
+
+                    let mut headers = worker::Headers::new();
+                    headers.set("Content-Type", "application/json")?;
+                    headers.set("x-goog-api-key", &selected_key.key)?;
+                    let mut req_init = worker::RequestInit::new();
+                    req_init
+                        .with_method(worker::Method::Post)
+                        .with_headers(headers)
+                        .with_body(Some(gemini_body_bytes.into()));
+                    (worker::Request::new_with_init(&native_endpoint, &req_init)?, false, true)
                 } else {
-                    let native_path = rest_resource
-                        .strip_prefix("google-ai-studio/")
-                        .unwrap_or(&rest_resource);
-                    req_init.with_body(Some(body_bytes.clone().into()));
-                    format!(
-                        "https://generativelanguage.googleapis.com/{}",
-                        native_path
-                    )
-                };
-
-                worker::Request::new_with_init(&url, &req_init)?
+                    // 3. LOCAL Native Passthrough -> Native Gemini Endpoint
+                    let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/{}", rest_resource.strip_prefix(&format!("{}/", provider)).unwrap_or(&rest_resource));
+                    let mut headers = worker::Headers::new();
+                    headers.set("Content-Type", "application/json")?;
+                    headers.set("x-goog-api-key", &selected_key.key)?;
+                    let mut req_init = worker::RequestInit::new();
+                    req_init
+                        .with_method(worker::Method::from(method.to_string()))
+                        .with_headers(headers)
+                        .with_body(Some(body_bytes.clone().into()));
+                    (worker::Request::new_with_init(&native_endpoint, &req_init)?, false, false)
+                }
             } else {
-                // In production, use the AI Gateway.
-                let request_id = uuid::Uuid::new_v4().to_string();
-                make_gateway_request(
-                    axum::http::Method::POST,
-                    &axum::http::HeaderMap::new(), // Placeholder, we aren't forwarding client headers here
-                    Some(body_bytes.clone()),
-                    env,
-                    &rest_resource,
-                    &selected_key.key,
-                    &request_id,
-                )
-                .await?
+                // --- PRODUCTION (AI GATEWAY) PATH ---
+                if rest_resource.starts_with("compat/embeddings") {
+                     // 4. REMOTE OpenAI Embeddings -> AI Gateway (needs translation)
+                    let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(&body_bytes)?;
+                    let gemini_req_body = gcp::translate_embeddings_request(openapi_req, &model_name);
+                    let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
+                    // The gateway needs the provider-specific path for routing
+                    let provider_rest_resource = format!("google-ai-studio/v1beta/models/{}:batchEmbedContents", model_name);
+
+                    let req = make_gateway_request(
+                        method.clone(),
+                        &headers,
+                        Some(gemini_body_bytes.clone()),
+                        env,
+                        &provider_rest_resource,
+                        &selected_key.key,
+                        &uuid::Uuid::new_v4().to_string(),
+                    ).await?;
+                    (req, true, false)
+                } else {
+                    // 5. REMOTE Passthrough (compat/chat or native) -> AI Gateway
+                    let req = make_gateway_request(
+                        method.clone(),
+                        &headers,
+                        Some(body_bytes.clone()),
+                        env,
+                        &rest_resource,
+                        &selected_key.key,
+                        &uuid::Uuid::new_v4().to_string(),
+                    ).await?;
+                    (req, false, false)
+                }
             };
 
-            let mut resp = worker::Fetch::Request(final_req).send().await?;
-
-            if resp.status_code() == 200 {
-                if is_local_dev && rest_resource.starts_with("compat/chat/completions") {
-                    let gemini_resp: GeminiChatResponse = resp.json().await?;
-                    let openapi_resp = gcp::translate_chat_response(gemini_resp, &model_name);
-                    let worker_resp = Response::from_json(&openapi_resp)?;
-                    return Ok(AxumWorkerResponse(worker_resp).into_response());
-                }
-                return Ok(AxumWorkerResponse(resp).into_response());
-            }
-
-            // --- 6. Error Handling for Gateway Requests ---
-            let status = resp.status_code();
-            let error_body_text = resp.text().await?;
-
-            match error_handling::analyze_error_with_retries(&provider, status, &error_body_text)
-                .await
-            {
-                ErrorAnalysis::KeyIsInvalid => {
-                    worker::console_error!(
-                        "Key {} is invalid and has been blocked.",
-                        selected_key.key
-                    );
-                    #[cfg(feature = "use_queue")]
-                    {
-                        let update = StateUpdate::SetStatus {
-                            key_id: selected_key.id.clone(),
-                            status: ApiKeyStatus::Blocked,
-                        };
-                        queue.send(&update).await?;
-                    }
+            // --- 5. Execute Request with Retry ---
+            let result = execute_request_with_retry(request_to_execute, &provider, 3).await?;
+            let latency = (Date::now() - start_time) as i64;
+            
+            // --- 6. Process Result and Update State ---
+            let final_response = match result {
+                RequestResult::Success(mut resp) => {
+                    // If we get here, the request was successful. Update metrics and return.
+                    let state_clone = state.clone();
+                    let selected_key_clone = selected_key.clone();
                     #[cfg(feature = "wait_until")]
-                    {
-                        let env = state.env.clone();
-                        let key_id = selected_key.id.clone();
-                        state.ctx.wait_until(async move {
-                            if let Ok(db) = env.d1("DB") {
-                                let _ = d1_storage::update_status(&db, &key_id, ApiKeyStatus::Blocked)
-                                    .await;
+                    state.ctx.wait_until(async move {
+                        if let Ok(db) = state_clone.env.d1("DB") {
+                            let update_future = d1_storage::update_key_metrics(
+                                &db,
+                                &selected_key_clone.id,
+                                true,
+                                latency,
+                            );
+                            if let Err(e) = update_future.await {
+                                worker::console_error!("Failed to update key metrics on success: {}", e);
                             }
-                        });
-                    }
-                }
-                ErrorAnalysis::KeyOnCooldown(duration) => {
-                    worker::console_warn!(
-                        "Key {} is cooling down for model {} for {}s.",
-                        selected_key.key,
-                        &model_name,
-                        duration.as_secs()
-                    );
+                        }
+                    });
                     #[cfg(feature = "use_queue")]
-                    {
-                        let update = StateUpdate::SetCooldown {
+                    queue
+                        .send(&StateUpdate::UpdateMetrics {
                             key_id: selected_key.id.clone(),
-                            model: model_name.to_string(),
-                            duration_secs: duration.as_secs(),
-                        };
-                        queue.send(&update).await?;
+                            is_success: true,
+                            latency,
+                        })
+                        .await?;
+
+                    // Translate response if needed
+                    if needs_embeddings_resp_translation {
+                        let gemini_resp: GeminiEmbeddingsResponse = resp.json().await?;
+                        let openapi_resp =
+                            gcp::translate_embeddings_response(gemini_resp, &model_name);
+                        Response::from_json(&openapi_resp)?
+                    } else if needs_chat_resp_translation {
+                         let gemini_resp: gcp::GeminiChatResponse = resp.json().await?;
+                         let openapi_resp = gcp::translate_chat_response(gemini_resp, &model_name);
+                         Response::from_json(&openapi_resp)?
+                    } else {
+                        resp
                     }
+                }
+                RequestResult::Failure {
+                    analysis,
+                    body_text,
+                    status,
+                } => {
+                    error!(key_id = selected_key.id, status, error_body = body_text, "Request failed for key");
+                    last_error_body = body_text;
+                    last_error_status = status;
+                    last_error_was_cooldown = matches!(analysis, ErrorAnalysis::KeyOnCooldown(_));
+
+                    // Update state based on the specific error analysis.
+                    let state_clone = state.clone();
+                    let selected_key_clone = selected_key.clone();
                     #[cfg(feature = "wait_until")]
-                    {
-                        let env = state.env.clone();
-                        let key_id = selected_key.id.clone();
-                        let model_name = model_name.to_string();
-                        state.ctx.wait_until(async move {
-                            if let Ok(db) = env.d1("DB") {
-                                let _ =
-                                    d1_storage::set_cooldown(&db, &key_id, &model_name, duration.as_secs())
-                                        .await;
+                    state.ctx.wait_until(async move {
+                         if let Ok(db) = state_clone.env.d1("DB") {
+                            let update_future = d1_storage::update_key_metrics(
+                                &db,
+                                &selected_key_clone.id,
+                                false,
+                                latency,
+                            );
+                            if let Err(e) = update_future.await {
+                                worker::console_error!("Failed to update key metrics on failure: {}", e);
                             }
-                        });
+                        }
+                    });
+
+                    match analysis {
+                        ErrorAnalysis::KeyIsInvalid => {
+                            let state_clone = state.clone();
+                            let key_id = selected_key.id.clone();
+                            #[cfg(feature = "wait_until")]
+                            state.ctx.wait_until(async move {
+                                if let Ok(db) = state_clone.env.d1("DB") {
+                                    let fut = d1_storage::update_status(
+                                        &db,
+                                        &key_id,
+                                        ApiKeyStatus::Blocked,
+                                    );
+                                    if let Err(e) = fut.await {
+                                        worker::console_error!("Failed to set key status to Blocked: {}", e);
+                                    }
+                                }
+                            });
+                        }
+                        ErrorAnalysis::KeyOnCooldown(duration) => {
+                             let state_clone = state.clone();
+                             let key_id = selected_key.id.clone();
+                             let provider = provider.clone();
+                             let model_name = model_name.clone();
+                             #[cfg(feature="wait_until")]
+                             state.ctx.wait_until(async move {
+                                if let Ok(db) = state_clone.env.d1("DB") {
+                                    let fut = d1_storage::set_key_model_cooldown_if_available(&db, &key_id, &provider, &model_name, duration.as_secs());
+                                    if let Err(e) = fut.await {
+                                        worker::console_error!("Failed to set key cooldown: {}", e);
+                                    }
+                                }
+                             });
+                        }
+                        // For UserError, we return immediately to the client.
+                        ErrorAnalysis::UserError => {
+                             let resp = Response::from_bytes(last_error_body.into_bytes())?.with_status(last_error_status);
+                             return Ok(AxumWorkerResponse(resp).into_response());
+                        }
+                        // For transient or unknown errors, just continue to the next key.
+                        _ => {}
                     }
+
+                    // In local dev, add a small delay to prevent potential TLS issues in `workerd`
+                    // when retrying connections very quickly.
+                    if is_local_dev {
+                        Delay::from(std::time::Duration::from_millis(200)).await;
+                    }
+
+                    continue; // Move to the next key in the failover loop.
                 }
-                ErrorAnalysis::Unknown => {
-                    worker::console_error!(
-                        "Gateway returned unhandled status {}. Error: {}",
-                        status,
-                        error_body_text
-                    );
-                }
-                ErrorAnalysis::UserError => {
-                    // Not a key issue, so return the error response to the user.
-                    return Ok(AxumWorkerResponse(
-                        Response::from_bytes(error_body_text.into_bytes())?.with_status(status),
-                    )
-                    .into_response());
-                }
-            }
-            // If we reach here, it was a key issue, so we continue to the next key.
+            };
+
+            return Ok(AxumWorkerResponse(final_response).into_response());
         }
 
-        error!("All keys failed for provider '{}' and model '{}'", provider, model_name);
-        Ok(create_openai_error_response(
-            "All available keys failed or are on cooldown.",
-            "server_error",
-            "all_keys_failed",
-            500,
-        )
-        .into_response())
+        // --- 7. Handle Complete Failure ---
+        // If the loop finishes, it means no key resulted in a successful response.
+        // We now decide what error to return based on the last failure we saw.
+        if last_error_was_cooldown {
+            // If the last attempt failed due to a rate limit, it's more informative
+            // to return the provider's actual error message.
+            let resp = Response::from_bytes(last_error_body.into_bytes())?.with_status(last_error_status);
+            Ok(AxumWorkerResponse(resp).into_response())
+        } else {
+            // For all other types of failures (invalid keys, server errors, etc.),
+            // return a generic "all keys failed" error.
+            Ok(create_openai_error_response(
+                &last_error_body,
+                "server_error",
+                "all_keys_failed",
+                last_error_status,
+            )
+            .into_response())
+        }
+
     }
     .await;
 
@@ -419,201 +546,5 @@ pub async fn forward(
 }
 
 
-/// Handles the specific three-tiered fallback logic for embedding requests.
-async fn handle_embeddings_fallback(
-    env: &Env,
-    #[cfg(feature = "wait_until")] ctx: &Context,
-    selected_key: &ApiKey,
-    body_bytes: &[u8],
-    model_name: &str,
-    #[cfg(feature = "use_queue")] queue: Option<&worker::Queue>,
-) -> Result<Response> {
-    let is_local_dev = env.var("IS_LOCAL").map(|v| v.to_string() == "true").unwrap_or(false);
-
-    let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(body_bytes)?;
-    let gemini_req_body = gcp::translate_embeddings_request(openapi_req, model_name);
-    let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
-
-    // In local development, we only make one attempt directly to the native API.
-    if is_local_dev {
-        let result = {
-            #[cfg(feature = "use_queue")]
-            {
-                let queue = env.queue("STATE_UPDATER")?;
-                try_native_embeddings_request(
-                    selected_key,
-                    model_name,
-                    &gemini_body_bytes,
-                    Some(&queue),
-                )
-                .await
-            }
-            #[cfg(feature = "wait_until")]
-            {
-                try_native_embeddings_request(
-                    ctx,
-                    env,
-                    selected_key,
-                    model_name,
-                    &gemini_body_bytes,
-                )
-                .await
-            }
-        };
-        match result {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                // In local dev, return a proper error response instead of propagating the error
-                return Ok(create_openai_error_response(
-                    &format!("Local dev embeddings request failed: {}. Make sure you have a valid Google API key.", e),
-                    "invalid_request_error",
-                    "local_dev_error",
-                    400,
-                ).0);
-            }
-        }
-    }
-
-    // --- Attempt 2: AI Gateway (Provider-Specific) ---
-    // In production, we first try the gateway's provider-specific endpoint.
-    let provider_rest_resource = format!("google-ai-studio/v1beta/models/{}:batchEmbedContents", model_name);
-    
-    let gateway_req = make_gateway_request(
-        // worker::Method::Post,
-        // &worker::Headers::new(),
-        axum::http::Method::POST,
-        &axum::http::HeaderMap::new(),
-        Some(gemini_body_bytes.clone()),
-        env,
-        &provider_rest_resource,
-        &selected_key.key,
-        &uuid::Uuid::new_v4().to_string(),
-    ).await?;
-
-    let mut resp = worker::Fetch::Request(gateway_req).send().await?;
-
-    if resp.status_code() == 200 {
-        let gemini_resp: GeminiEmbeddingsResponse = resp.json().await?;
-        let openapi_resp = gcp::translate_embeddings_response(gemini_resp, model_name);
-        return Response::from_json(&openapi_resp);
-    }
-    worker::console_warn!("Embeddings Fallback Attempt 2 (Gateway Provider-Specific) failed with status {}.", resp.status_code());
-
-
-    // --- Attempt 3: Native Google API ---
-    // If the gateway fails, we try the native API directly.
-    {
-        #[cfg(feature = "use_queue")]
-        {
-            let queue = env.queue("STATE_UPDATER")?;
-            try_native_embeddings_request(
-                selected_key,
-                model_name,
-                &gemini_body_bytes,
-                Some(&queue),
-            )
-            .await
-        }
-        #[cfg(feature = "wait_until")]
-        {
-            try_native_embeddings_request(
-                ctx,
-                env,
-                selected_key,
-                model_name,
-                &gemini_body_bytes,
-            )
-            .await
-        }
-    }
-}
-
-/// Helper function for the native Google API part of the embeddings fallback.
-async fn try_native_embeddings_request(
-    #[cfg(feature = "wait_until")] ctx: &Context,
-    #[cfg(feature = "wait_until")] env: &Env,
-    selected_key: &ApiKey,
-    model_name: &str,
-    gemini_body_bytes: &[u8],
-    #[cfg(feature = "use_queue")] queue: Option<&worker::Queue>,
-) -> Result<Response> {
-    let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents", model_name);
-    let headers = worker::Headers::new();
-    headers.set("Content-Type", "application/json")?;
-    headers.set("x-goog-api-key", &selected_key.key)?;
-
-    let mut req_init = worker::RequestInit::new();
-    req_init
-        .with_method(worker::Method::Post)
-        .with_headers(headers)
-        .with_body(Some(gemini_body_bytes.to_vec().into()));
-    
-    let native_req = worker::Request::new_with_init(&native_endpoint, &req_init)?;
-    let mut native_resp = worker::Fetch::Request(native_req).send().await?;
-
-    if native_resp.status_code() == 200 {
-        let gemini_resp: GeminiEmbeddingsResponse = native_resp.json().await?;
-        let openapi_resp = gcp::translate_embeddings_response(gemini_resp, model_name);
-        return Response::from_json(&openapi_resp);
-    }
-    worker::console_warn!("Embeddings Native API request failed with status {}.", native_resp.status_code());
-
-    // If the attempt fails, analyze the error to decide whether to block or cool down the key.
-    let status = native_resp.status_code();
-    let error_body_text = native_resp.text().await?;
-    match error_handling::analyze_error_with_retries("google-ai-studio", status, &error_body_text)
-        .await
-    {
-        ErrorAnalysis::KeyIsInvalid => {
-            #[cfg(feature = "use_queue")]
-            {
-                let update = StateUpdate::SetStatus {
-                    key_id: selected_key.id.clone(),
-                    status: ApiKeyStatus::Blocked,
-                };
-                queue.unwrap().send(&update).await?;
-            }
-            #[cfg(feature = "wait_until")]
-            {
-                let env = env.clone();
-                let key_id = selected_key.id.clone();
-                ctx.wait_until(async move {
-                    if let Ok(db) = env.d1("DB") {
-                        let _ = d1_storage::update_status(&db, &key_id, ApiKeyStatus::Blocked)
-                            .await;
-                    }
-                });
-            }
-        }
-        ErrorAnalysis::KeyOnCooldown(duration) => {
-            #[cfg(feature = "use_queue")]
-            {
-                let update = StateUpdate::SetCooldown {
-                    key_id: selected_key.id.clone(),
-                    model: model_name.to_string(),
-                    duration_secs: duration.as_secs(),
-                };
-                queue.unwrap().send(&update).await?;
-            }
-            #[cfg(feature = "wait_until")]
-            {
-                let env = env.clone();
-                let key_id = selected_key.id.clone();
-                let model_name = model_name.to_string();
-                ctx.wait_until(async move {
-                    if let Ok(db) = env.d1("DB") {
-                        let _ =
-                            d1_storage::set_cooldown(&db, &key_id, &model_name, duration.as_secs())
-                                .await;
-                    }
-                });
-            }
-        }
-        _ => {} // Ignore other errors for now
-    }
-    
-    // Return a generic error indicating this key failed. The main loop will then try the next key.
-    Err("Native embeddings request failed for this key.".into())
-}
 
 

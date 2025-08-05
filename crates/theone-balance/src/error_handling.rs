@@ -34,6 +34,8 @@ pub enum ErrorAnalysis {
     KeyOnCooldown(Duration),
     /// The error is not key-related and should be returned to the client.
     UserError,
+    /// The error is a transient server error and a retry may be warranted.
+    TransientServerError,
     /// The error is unrecognized.
     Unknown,
 }
@@ -98,7 +100,7 @@ pub fn key_is_invalid_from_error(error_body: &GoogleErrorResponse) -> bool {
 
 /// A new, more generic error analysis function that handles different providers
 /// and status codes before delegating to provider-specific logic.
-pub async fn analyze_error_with_retries(provider: &str, status: u16, body_text: &str) -> ErrorAnalysis {
+pub async fn analyze_provider_error(provider: &str, status: u16, body_text: &str) -> ErrorAnalysis {
     match status {
         401 | 403 => return ErrorAnalysis::KeyIsInvalid,
         400 => {
@@ -119,15 +121,22 @@ pub async fn analyze_error_with_retries(provider: &str, status: u16, body_text: 
         }
         429 | 503 => {
             if provider == "google-ai-studio" {
-                                let error_body = serde_json::from_str::<Vec<GoogleErrorResponse>>(body_text)
-                    .ok()
-                    .and_then(|mut v| v.pop())
-                    .or_else(|| serde_json::from_str(body_text).ok())
-                    .unwrap_or_default();
+                // Google can return a single error object or an array with one object.
+                // We try to parse as a single object first, and fall back to the array.
+                let error_body: GoogleErrorResponse =
+                    serde_json::from_str(body_text).unwrap_or_else(|_| {
+                        serde_json::from_str::<Vec<GoogleErrorResponse>>(body_text)
+                            .ok()
+                            .and_then(|mut v| v.pop())
+                            .unwrap_or_default()
+                    });
                 return analyze_google_error(&error_body);
             }
             // Fallback for other providers
             return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DEFAULT_COOLDOWN_SECONDS));
+        }
+        500 | 502 | 503 | 504 => {
+            return ErrorAnalysis::TransientServerError;
         }
         _ => ErrorAnalysis::Unknown,
     }

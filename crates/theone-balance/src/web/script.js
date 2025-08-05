@@ -1,4 +1,24 @@
 
+
+function closeTestResultsModal(event) {
+    // If the event is passed, it's a click event.
+    // We only close if the click is on the backdrop (the modal itself).
+    if (!event || event.target === event.currentTarget) {
+        const modal = document.getElementById('testResultsModal');
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const modal = document.getElementById('testResultsModal');
+    // If the modal is rendered without the 'hidden' class, it means
+    // there are results to show. We just need to make sure it's visible.
+    if (modal && !modal.classList.contains('hidden')) {
+       modal.classList.add('flex');
+    }
+});
+
 function copyToClipboard(text, element) {
     navigator.clipboard.writeText(text).then(function() {
         const tooltip = element.parentElement.querySelector('.copy-tooltip');

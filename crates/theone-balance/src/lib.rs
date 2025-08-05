@@ -7,7 +7,9 @@ pub mod handlers;
 pub mod hybrid;
 pub mod models;
 pub mod queue;
+pub mod request;
 pub mod router;
+pub mod testing;
 pub mod util;
 pub mod web;
 pub mod state {

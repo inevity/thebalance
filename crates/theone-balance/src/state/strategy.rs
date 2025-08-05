@@ -21,6 +21,16 @@ pub struct ApiKey {
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+    #[serde(default)]
+    pub latency_ms: i64,
+    #[serde(default)]
+    pub success_rate: f64,
+    #[serde(default)]
+    pub consecutive_failures: i64,
+    #[serde(default)]
+    pub last_checked_at: u64,
+    #[serde(default)]
+    pub last_succeeded_at: u64,
 }
 
 impl ApiKey {

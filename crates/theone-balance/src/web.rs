@@ -1,13 +1,15 @@
 //! This module contains all UI-related logic, including Axum handlers and Maud templates.
 
-use crate::{d1_storage, state::strategy::ApiKey, util, AppState};
+use crate::{d1_storage, state::strategy::ApiKey, testing, util, AppState};
 use axum::{
+    body::Bytes,
     extract::{Form, FromRef, FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Json, Redirect, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use base64::{engine::general_purpose, Engine as _};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use phf::phf_map;
 use serde::{Deserialize, Deserializer};
@@ -58,6 +60,7 @@ pub fn ui_router() -> Router<Arc<AppState>> {
             "/keys/{provider}",
             get(get_keys_list_page_handler).post(post_keys_list_handler),
         )
+        .route("/api/keys/add/{provider}", post(post_add_keys_api_handler))
         .route("/api/keys/{id}/coolings", get(get_key_coolings_handler))
 }
 
@@ -113,9 +116,21 @@ pub struct KeysListParams {
 pub async fn get_keys_list_page_handler(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
+    cookies: Cookies,
     Query(params): Query<KeysListParams>,
     _layout: PageLayout,
 ) -> Response {
+    let mut test_results: Option<Vec<testing::TestResult>> = None;
+    if let Some(cookie) = cookies.get("test_results") {
+        if let Ok(decoded) = general_purpose::STANDARD.decode(cookie.value()) {
+            if let Ok(results) = serde_json::from_slice(&decoded) {
+                test_results = Some(results);
+            }
+        }
+        // Remove the cookie after reading
+        cookies.remove(Cookie::named("test_results"));
+    }
+
     let status: &str = params.status.as_deref().unwrap_or("active");
     let q: &str = params.q.as_deref().unwrap_or("");
     let page = params.page.unwrap_or(1);
@@ -147,7 +162,6 @@ pub async fn get_keys_list_page_handler(
         };
 
     let content = keys_list_page(
-        // &provider, status, q, keys, total, page, 20, sort_by, sort_order,
         provider.as_str(),
         status,
         q,
@@ -157,6 +171,7 @@ pub async fn get_keys_list_page_handler(
         20,
         sort_by,
         sort_order,
+        test_results,
     );
     //(
     //    StatusCode::OK,
@@ -208,11 +223,10 @@ where
     deserializer.deserialize_any(OneOrManyVisitor)
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
 pub struct KeysListForm {
     action: String,
     keys: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
     key_id: Vec<String>,
 }
 
@@ -274,8 +288,46 @@ pub struct KeysListForm {
 pub async fn post_keys_list_handler(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
-    Form(form): Form<KeysListForm>,
+    cookies: Cookies,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let pairs: Vec<(String, String)> = match serde_urlencoded::from_bytes(&body) {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            worker::console_log!("Failed to deserialize form body into pairs: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to deserialize form body into pairs: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let mut action = String::new();
+    let mut keys: Option<String> = None;
+    let mut key_id: Vec<String> = Vec::new();
+
+    for (key, value) in pairs {
+        match key.as_str() {
+            "action" => action = value,
+            "keys" => keys = Some(value),
+            "key_id[]" => key_id.push(value),
+            _ => {} // Ignore other fields
+        }
+    }
+
+    if action.is_empty() {
+        let error_message = "Form is missing 'action' field".to_string();
+        worker::console_log!("{}", &error_message);
+        return (StatusCode::BAD_REQUEST, error_message).into_response();
+    }
+
+    let form = KeysListForm {
+        action,
+        keys,
+        key_id,
+    };
+    worker::console_log!("Form data: {:?}", form);
     if form.action == "add" {
         if let Some(keys_str) = form.keys {
             let db = state.env.d1("DB").unwrap();
@@ -302,6 +354,22 @@ pub async fn post_keys_list_handler(
                     )
                         .into_response()
                 }
+            }
+        }
+    } else if form.action == "test" {
+        if !form.key_id.is_empty() {
+            let results = testing::test_keys(state, &provider, form.key_id)
+                .await
+                .unwrap_or_else(|e| {
+                    vec![testing::TestResult {
+                        key: "".to_string(),
+                        passed: false,
+                        details: format!("Failed to run tests: {}", e),
+                    }]
+                });
+            if let Ok(json_results) = serde_json::to_string(&results) {
+                let encoded = general_purpose::STANDARD.encode(json_results);
+                cookies.add(Cookie::new("test_results", encoded));
             }
         }
     } else if form.action == "delete-all-blocked" {
@@ -366,6 +434,33 @@ pub async fn post_keys_list_handler(
 //    (StatusCode::OK, content).into_response()
 //}
 // endregion: --- Keys List Page Handlers
+
+// region: --- API Handlers
+#[worker::send]
+pub async fn post_add_keys_api_handler(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    body: String,
+) -> impl IntoResponse {
+    let db = match state.env.d1("DB") {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+                .into_response()
+        }
+    };
+    match d1_storage::add_keys(&db, &provider, &body).await {
+        Ok(_) => (StatusCode::OK, "Keys added successfully").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to add keys: {}", e),
+        )
+            .into_response(),
+    }
+}
 
 // region: --- API Handlers
 #[worker::send]
@@ -522,12 +617,14 @@ fn keys_list_page(
     page_size: usize,
     sort_by: &str,
     sort_order: &str,
+    test_results: Option<Vec<testing::TestResult>>,
 ) -> Markup {
     html! {
         (build_breadcrumb(provider))
         (build_keys_table(provider, current_status, q, keys, total, page, page_size, sort_by, sort_order))
         (build_add_keys_form(provider, current_status, q, page, sort_by, sort_order))
         (build_model_coolings_modal())
+        (build_test_results_modal(test_results))
     }
 }
 
@@ -617,6 +714,10 @@ fn build_table_header(
                     }
                 }
                 div class="flex items-center gap-2" {
+                    button type="submit" name="action" value="test"
+                            class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-blue-600/25 hover:-translate-y-0.5 border border-blue-600" {
+                        "Test Selected"
+                    }
                     button type="submit" name="action" value="delete"
                             class="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-red-600/25 hover:-translate-y-0.5 border border-red-600" {
                         "Delete Selected"
@@ -679,7 +780,7 @@ fn build_table_content(
                     tr class="bg-gradient-to-r from-slate-100/90 to-gray-100/90 border-b border-gray-400/80 backdrop-blur-sm" {
                         th class="p-4 text-left" {
                             input type="checkbox"
-                                   onchange="document.querySelectorAll('[name=key_id]').forEach(c => c.checked = this.checked)"
+                                   onchange="document.querySelectorAll('[name=\"key_id[]\"]').forEach(c => c.checked = this.checked)"
                                    class="h-4 w-4 text-blue-600 bg-white border-gray-500 rounded focus:ring-blue-500 transition-colors backdrop-blur-sm";
                         }
                         th class="p-4 text-left font-semibold text-slate-800 text-sm tracking-wide" { "API Key" }
@@ -703,7 +804,7 @@ fn build_key_rows(keys: Vec<ApiKey>) -> Markup {
         @for k in keys {
             tr class="group hover:bg-blue-100/60 even:bg-slate-100/40 odd:bg-white/60 transition-all duration-300 hover:shadow-md backdrop-blur-sm border-b border-gray-300/50" {
                 td class="p-4" {
-                    input type="checkbox" name="key_id" value=(k.id)
+                    input type="checkbox" name="key_id[]" value=(k.id)
                            class="h-4 w-4 text-blue-600 bg-white border-gray-500 rounded focus:ring-blue-500 focus:ring-2 transition-colors backdrop-blur-sm";
                 }
                 td class="p-4" {
@@ -1066,6 +1167,63 @@ fn build_model_coolings_modal() -> Markup {
                 }
                 div class="p-6 overflow-y-auto max-h-96" {
                     div id="modelCoolingsTable" {}
+                }
+            }
+        }
+    }
+}
+
+fn build_test_results_modal(test_results: Option<Vec<testing::TestResult>>) -> Markup {
+    let (hidden_class, results_table) = if let Some(results) = test_results {
+        ("", build_test_results_table(results))
+    } else {
+        ("hidden", html! {})
+    };
+
+    html! {
+        div id="testResultsModal" class={"fixed inset-0 bg-black bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-50 " (hidden_class)} onclick="closeTestResultsModal(event)" {
+            div class="glass-card bg-white rounded-3xl shadow-2xl border border-gray-200 max-w-4xl w-full mx-6 max-h-[80vh] overflow-hidden" onclick="event.stopPropagation()" {
+                div class="p-6 border-b border-gray-200 bg-white/80" {
+                    div class="flex items-center justify-between" {
+                        h3 class="text-xl font-bold text-gray-900" { "Test Results" }
+                        button onclick="closeTestResultsModal()" class="p-2 hover:bg-gray-100 rounded-lg transition-colors duration-200" {
+                            svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" {
+                                path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" {}
+                            }
+                        }
+                    }
+                }
+                div class="p-6 overflow-y-auto max-h-[calc(80vh-140px)]" {
+                    (results_table)
+                }
+            }
+        }
+    }
+}
+
+fn build_test_results_table(results: Vec<testing::TestResult>) -> Markup {
+    html! {
+        table class="w-full text-left" {
+            thead {
+                tr class="border-b border-gray-300" {
+                    th class="p-4 font-semibold" { "Key" }
+                    th class="p-4 font-semibold" { "Status" }
+                    th class="p-4 font-semibold" { "Details" }
+                }
+            }
+            tbody {
+                @for result in results {
+                    tr class="border-b border-gray-200" {
+                        td class="p-4 font-mono text-sm" { (result.key) }
+                        td class="p-4" {
+                            @if result.passed {
+                                span class="px-3 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded-full" { "Passed" }
+                            } @else {
+                                span class="px-3 py-1 bg-red-100 text-red-800 text-xs font-semibold rounded-full" { "Failed" }
+                            }
+                        }
+                        td class="p-4 text-sm text-gray-600" { (result.details) }
+                    }
                 }
             }
         }

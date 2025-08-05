@@ -188,6 +188,11 @@ fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
         total_cooling_seconds: db_key.total_cooling_seconds as u64,
         created_at: db_key.created_at as u64,
         updated_at: db_key.updated_at as u64,
+        latency_ms: db_key.latency_ms,
+        success_rate: db_key.success_rate as f64 / 1000.0,
+        consecutive_failures: db_key.consecutive_failures,
+        last_checked_at: db_key.last_checked_at as u64,
+        last_succeeded_at: db_key.last_succeeded_at as u64,
     }
 }
 
