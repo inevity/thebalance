@@ -60,17 +60,18 @@ enum RequestResult {
     },
 }
 
-#[instrument(skip(req), fields(provider))]
+#[instrument(skip(req), fields(provider, retry_attempt = tracing::field::Empty))]
 async fn execute_request_with_retry(
     req: worker::Request,
     provider: &str,
     max_attempts: u32,
 ) -> Result<RequestResult> {
-    let mut attempt = 0;
+    let mut retry_attempt = 0;
     loop {
-        attempt += 1;
+        tracing::Span::current().record("retry_attempt", retry_attempt);
+
         let req_clone = req.clone()?;
-        info!(attempt, url = %req_clone.url()?, "Attempting to send request to provider");
+        info!(url = %req_clone.url()?, "Attempting to send request to provider");
 
         match worker::Fetch::Request(req_clone).send().await {
             Ok(mut resp) => {
@@ -83,10 +84,10 @@ async fn execute_request_with_retry(
                 let analysis = error_handling::analyze_provider_error(provider, status, &error_body_text).await;
 
                 if let ErrorAnalysis::TransientServerError = analysis {
-                     if attempt < max_attempts {
-                        warn!(attempt, status, "Request failed with transient server error, retrying...");
+                     if retry_attempt + 1 < max_attempts {
+                        warn!(status, "Request failed with transient server error, retrying...");
                     } else {
-                        warn!(attempt, status, "Request failed with transient server error after max attempts");
+                        warn!(status, "Request failed with transient server error after max attempts");
                         return Ok(RequestResult::Failure {
                             analysis,
                             body_text: error_body_text,
@@ -103,10 +104,10 @@ async fn execute_request_with_retry(
                 }
             }
             Err(e) => {
-                if attempt < max_attempts {
-                    warn!(attempt, error = %e, "Request failed with network error, retrying...");
+                if retry_attempt + 1 < max_attempts {
+                    warn!(error = %e, "Request failed with network error, retrying...");
                 } else {
-                    warn!(attempt, error = %e, "Request failed with network error after max attempts");
+                    warn!(error = %e, "Request failed with network error after max attempts");
                     // We must return a RequestResult::Failure here so the key failover loop can continue.
                     // Re-classifying the worker::Error into our enum.
                     return Ok(RequestResult::Failure {
@@ -119,7 +120,8 @@ async fn execute_request_with_retry(
         };
 
         // If we've reached here, it's a retryable error. Calculate delay and continue.
-        let delay = std::time::Duration::from_millis(100 * 2_u64.pow(attempt));
+        retry_attempt += 1;
+        let delay = std::time::Duration::from_millis(100 * 2_u64.pow(retry_attempt + 1));
         let jitter = std::time::Duration::from_millis(rand::random::<u64>() % 100);
         let delay_duration = delay + jitter;
         Delay::from(delay_duration).await;
@@ -301,9 +303,10 @@ pub async fn forward(
         let mut last_error_body = "No active keys were available or all attempts failed.".to_string();
         let mut last_error_status = 503;
         let mut last_error_was_cooldown = false;
+        let mut failover_attempt = 0;
 
         for selected_key in sorted_keys {
-            let key_span = span!(Level::INFO, "key_failover", key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
+            let key_span = span!(Level::INFO, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
             let _enter = key_span.enter();
 
             let now = (Date::now() / 1000.0) as u64;
@@ -533,6 +536,7 @@ pub async fn forward(
                         Delay::from(std::time::Duration::from_millis(200)).await;
                     }
 
+                    failover_attempt += 1;
                     continue; // Move to the next key in the failover loop.
                 }
             };
