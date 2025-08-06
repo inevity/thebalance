@@ -264,14 +264,14 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
 }
 
 pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    if let Some(keys) = API_KEY_CACHE.get(provider) {
+    if let Some(keys) = API_KEY_CACHE.get(provider).await {
         return Ok(keys);
     }
 
     let keys = get_healthy_sorted_keys(db, provider).await?;
+    info!(provider, "Cache miss for provider. Populating cache from D1 with {} keys.", keys.len());
     API_KEY_CACHE.insert(provider.to_string(), keys.clone()).await;
 
-    info!("cache refreshed for {}: {} keys", provider, keys.len());
     Ok(keys)
 }
 
@@ -296,7 +296,7 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> S
     if let Some(key) = existing {
         let mut updated_key = db_key_to_api_key(key);
         updated_key.status = status;
-        update_key_in_cache(&updated_key.provider, updated_key).await;
+        update_key_in_cache(&updated_key.provider.clone(), updated_key).await;
         
         // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
@@ -389,7 +389,7 @@ pub async fn set_key_model_cooldown_if_available(
         // Update in database
         let update_query = DbKey::filter_by_id(id.to_string())
             .update()
-            .model_coolings(key.model_coolings)
+            .model_coolings(key.model_coolings.clone())
             .total_cooling_seconds(new_total_cooling_seconds)
             .updated_at(now as i64);
         
@@ -486,7 +486,7 @@ pub async fn update_key_metrics(
         updated_api_key.last_checked_at = new_last_checked_at as u64;
         updated_api_key.last_succeeded_at = new_last_succeeded_at as u64;
         updated_api_key.updated_at = now as u64;
-        update_key_in_cache(&updated_api_key.provider, updated_api_key).await;
+        update_key_in_cache(&updated_api_key.provider.clone(), updated_api_key).await;
     }
 
     Ok(())

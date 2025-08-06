@@ -6,6 +6,7 @@ use crate::{
     gcp, models::*,
     state::strategy::*,
     util, AppState,
+    dbmodels::ModelCooling,
 };
 #[cfg(feature = "use_queue")]
 use crate::queue::StateUpdate;
@@ -141,7 +142,7 @@ pub async fn get_active_keys(provider: &str, env: &Env) -> Result<Vec<ApiKey>> {
     #[cfg(feature = "raw_d1")]
     {
         let db = env.d1("DB")?;
-        Ok(crate::d1_storage::list_active_keys_via_cache(&db, provider).await.map_err(|e| worker::Error::from(e))?)
+        Ok(crate::d1_storage::get_healthy_sorted_keys_via_cache(&db, provider).await.map_err(|e| worker::Error::from(e))?)
     }
     #[cfg(not(feature = "raw_d1"))]
     {
@@ -306,7 +307,7 @@ pub async fn forward(
         let mut last_error_was_cooldown = false;
         let mut failover_attempt = 0;
 
-        for selected_key in sorted_keys {
+        for selected_key in &sorted_keys {
             let key_span = span!(Level::WARN, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
             let _enter = key_span.enter();
 
@@ -493,6 +494,7 @@ pub async fn forward(
                             // Optimistically update the cache immediately
                             let mut updated_key = selected_key.clone();
                             updated_key.status = ApiKeyStatus::Blocked;
+                            error!(key_id = %selected_key.id, "Key identified as invalid. Updating status to Blocked in local cache and D1.");
                             d1_storage::update_key_in_cache(&provider, updated_key).await;
 
                             // Dispatch the database update to the background
@@ -515,15 +517,9 @@ pub async fn forward(
                         ErrorAnalysis::KeyOnCooldown(duration) => {
                              // Optimistically update the cache immediately
                              let mut updated_key = selected_key.clone();
-                             if let Some(cooling) = updated_key.model_coolings.get_mut(&model_name) {
-                                 cooling.end_at = (Date::now() / 1000.0) as i64 + duration.as_secs() as i64;
-                             } else {
-                                 let new_cooling = ModelCooling {
-                                     end_at: (Date::now() / 1000.0) as i64 + duration.as_secs() as i64,
-                                     total_seconds: 0,
-                                 };
-                                 updated_key.model_coolings.insert(model_name.clone(), new_cooling);
-                             }
+                             let cooldown_end = (Date::now() / 1000.0) as u64 + duration.as_secs();
+                             updated_key.model_coolings.insert(model_name.clone(), cooldown_end);
+                             info!(key_id = %selected_key.id, model = %model_name, "Updating cooldown for key in local cache.");
                              d1_storage::update_key_in_cache(&provider, updated_key).await;
 
                              // Dispatch the database update to the background
@@ -575,6 +571,18 @@ pub async fn forward(
         } else {
             // For all other types of failures (invalid keys, server errors, etc.),
             // return a generic "all keys failed" error.
+            let top_5_keys_summary: Vec<_> = sorted_keys.iter().take(5).map(|k| {
+                format!("id: {}, status: {:?}, failures: {}, latency: {}ms, rate: {:.2}", k.id, k.status, k.consecutive_failures, k.latency_ms, k.success_rate)
+            }).collect();
+
+            warn!(
+                last_provider_error = %last_error_body,
+                last_provider_status = last_error_status,
+                failover_summary.total_keys = sorted_keys.len(),
+                failover_summary.top_5_keys = ?top_5_keys_summary,
+                "All keys for provider failed after failover attempts."
+            );
+
             Ok(create_openai_error_response(
                 &last_error_body,
                 "server_error",
