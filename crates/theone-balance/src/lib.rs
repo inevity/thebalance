@@ -39,6 +39,7 @@ use tracing_web::{performance_layer, MakeConsoleWriter};
 
 #[event(start)]
 fn start() {
+    console_error_panic_hook::set_once();
     let fmt_layer = tracing_subscriber::fmt::layer()
         .pretty()
         .with_ansi(false) // Only partially supported across JavaScript runtimes
@@ -67,7 +68,6 @@ pub async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
-    console_error_panic_hook::set_once();
     let app_state = Arc::new(AppState {
         env: SendWrapper::new(env),
         ctx: SendWrapper::new(_ctx),
