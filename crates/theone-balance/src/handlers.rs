@@ -490,6 +490,12 @@ pub async fn forward(
 
                     match analysis {
                         ErrorAnalysis::KeyIsInvalid => {
+                            // Optimistically update the cache immediately
+                            let mut updated_key = selected_key.clone();
+                            updated_key.status = ApiKeyStatus::Blocked;
+                            d1_storage::update_key_in_cache(&provider, updated_key).await;
+
+                            // Dispatch the database update to the background
                             let state_clone = state.clone();
                             let key_id = selected_key.id.clone();
                             #[cfg(feature = "wait_until")]
@@ -507,6 +513,20 @@ pub async fn forward(
                             });
                         }
                         ErrorAnalysis::KeyOnCooldown(duration) => {
+                             // Optimistically update the cache immediately
+                             let mut updated_key = selected_key.clone();
+                             if let Some(cooling) = updated_key.model_coolings.get_mut(&model_name) {
+                                 cooling.end_at = (Date::now() / 1000.0) as i64 + duration.as_secs() as i64;
+                             } else {
+                                 let new_cooling = ModelCooling {
+                                     end_at: (Date::now() / 1000.0) as i64 + duration.as_secs() as i64,
+                                     total_seconds: 0,
+                                 };
+                                 updated_key.model_coolings.insert(model_name.clone(), new_cooling);
+                             }
+                             d1_storage::update_key_in_cache(&provider, updated_key).await;
+
+                             // Dispatch the database update to the background
                              let state_clone = state.clone();
                              let key_id = selected_key.id.clone();
                              let provider = provider.clone();

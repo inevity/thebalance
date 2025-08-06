@@ -9,13 +9,23 @@ use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
 use std::collections::HashMap;
-use std::cell::RefCell;
 use toasty::stmt::{IntoInsert, IntoSelect};
 use worker::D1Database;
 use toasty::Error as ToastyError;
 use std::result::Result as StdResult;
 use thiserror::Error;
 use tracing::info;
+use moka::future::Cache as MokaCache;
+use once_cell::sync::Lazy;
+use std::time::Duration;
+
+static API_KEY_CACHE: Lazy<MokaCache<String, Vec<ApiKey>>> = Lazy::new(|| {
+    MokaCache::builder()
+        .time_to_live(Duration::from_secs(60))
+        .name("api-key-cache")
+        .build()
+});
+
 
 
 #[derive(Debug, Error)]
@@ -35,23 +45,9 @@ impl From<StorageError> for worker::Error {
     }
 }
 
-#[derive(Clone)]
-struct Cache<T> {
-    data: T,
-    updated_at: f64, // seconds since epoch
-    is_dirty: bool,
-}
 
 use uuid::Uuid;
 use toasty::stmt::Id;
-
-// Thread-local storage for active keys cache
-// Only shared within a worker instance (shutdown if idle)
-thread_local! {
-    static ACTIVE_KEYS_CACHE_BY_PROVIDER: RefCell<HashMap<String, Cache<Vec<ApiKey>>>> = RefCell::new(HashMap::new());
-}
-
-const CACHE_MAX_AGE_SECONDS: f64 = 30.0;
 
 /// Convert a DbKey to an ApiKey
 fn db_key_to_api_key(db_key: DbKey) -> ApiKey {
@@ -267,97 +263,29 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
     Ok(active_keys)
 }
 
-pub async fn list_active_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    let now = Date::now() / 1000.0;
-
-    let needs_refresh = ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-        let cache_map = cache.borrow();
-        if let Some(cache_entry) = cache_map.get(provider) {
-            now - cache_entry.updated_at >= CACHE_MAX_AGE_SECONDS || cache_entry.is_dirty
-        } else {
-            true
-        }
-    });
-
-    if !needs_refresh {
-        return Ok(ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-            cache.borrow()
-                .get(provider)
-                .map(|entry| entry.data.clone())
-                .unwrap_or_else(Vec::new)
-        }));
-    }
-
-    let keys = get_active_keys(db, provider).await?;
-
-    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-        let mut cache_map = cache.borrow_mut();
-        cache_map.insert(
-            provider.to_string(),
-            Cache {
-                data: keys.clone(),
-                updated_at: now,
-                is_dirty: false,
-            },
-        );
-    });
-
-    info!("cache refreshed for {}: {} keys", provider, keys.len());
-    Ok(keys)
-}
-
 pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    let now = Date::now() / 1000.0;
-    
-    // Check if we have a valid cache entry
-    let needs_refresh = ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-        let cache_map = cache.borrow();
-        if let Some(cache_entry) = cache_map.get(provider) {
-            now - cache_entry.updated_at >= CACHE_MAX_AGE_SECONDS || cache_entry.is_dirty
-        } else {
-            true
-        }
-    });
-    
-    if !needs_refresh {
-        // Return cached data
-        return Ok(ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-            cache.borrow()
-                .get(provider)
-                .map(|entry| entry.data.clone())
-                .unwrap_or_else(Vec::new)
-        }));
+    if let Some(keys) = API_KEY_CACHE.get(provider) {
+        return Ok(keys);
     }
-    
-    // Cache miss or expired, fetch from database and sort by health
+
     let keys = get_healthy_sorted_keys(db, provider).await?;
-    
-    // Update cache
-    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-        let mut cache_map = cache.borrow_mut();
-        cache_map.insert(
-            provider.to_string(),
-            Cache {
-                data: keys.clone(),
-                updated_at: now,
-                is_dirty: false,
-            },
-        );
-    });
-    
+    API_KEY_CACHE.insert(provider.to_string(), keys.clone()).await;
+
     info!("cache refreshed for {}: {} keys", provider, keys.len());
     Ok(keys)
 }
 
-// Helper function to mark cache as dirty when keys are modified
-fn mark_provider_cache_dirty(provider: &str) {
-    ACTIVE_KEYS_CACHE_BY_PROVIDER.with(|cache| {
-        let mut cache_map = cache.borrow_mut();
-        if let Some(cache_entry) = cache_map.get_mut(provider) {
-            cache_entry.is_dirty = true;
+pub async fn update_key_in_cache(provider: &str, updated_key: ApiKey) {
+    if let Some(mut keys) = API_KEY_CACHE.get(provider).await {
+        if let Some(key_to_update) = keys.iter_mut().find(|k| k.id == updated_key.id) {
+            *key_to_update = updated_key;
+            // Re-insert the modified Vec back into the cache.
+            API_KEY_CACHE.insert(provider.to_string(), keys).await;
         }
-    });
+    }
 }
+
+
 
 pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
@@ -366,8 +294,9 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> S
     let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
     
     if let Some(key) = existing {
-        // Mark cache as dirty for this provider
-        mark_provider_cache_dirty(&key.provider);
+        let mut updated_key = db_key_to_api_key(key);
+        updated_key.status = status;
+        update_key_in_cache(&updated_key.provider, updated_key).await;
         
         // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
@@ -465,9 +394,10 @@ pub async fn set_key_model_cooldown_if_available(
             .updated_at(now as i64);
         
         executor.exec_update(update_query.stmt).await?;
-        
-        // Mark cache as dirty for this provider
-        mark_provider_cache_dirty(provider);
+
+        key.total_cooling_seconds = new_total_cooling_seconds;
+        let updated_api_key = db_key_to_api_key(key);
+        update_key_in_cache(provider, updated_api_key).await;
         
         Ok(true)
     } else {
@@ -549,7 +479,14 @@ pub async fn update_key_metrics(
         
         executor.exec_update(update_query.stmt).await?;
         
-        mark_provider_cache_dirty(&key.provider);
+        let mut updated_api_key = db_key_to_api_key(key);
+        updated_api_key.latency_ms = new_latency;
+        updated_api_key.success_rate = new_success_rate as f64 / 1000.0;
+        updated_api_key.consecutive_failures = new_consecutive_failures;
+        updated_api_key.last_checked_at = new_last_checked_at as u64;
+        updated_api_key.last_succeeded_at = new_last_succeeded_at as u64;
+        updated_api_key.updated_at = now as u64;
+        update_key_in_cache(&updated_api_key.provider, updated_api_key).await;
     }
 
     Ok(())
