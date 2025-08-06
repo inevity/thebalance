@@ -60,10 +60,11 @@ enum RequestResult {
     },
 }
 
-#[instrument(skip(req), fields(provider, retry_attempt = tracing::field::Empty))]
+#[instrument(skip_all, level = "warn", fields(provider, key_id, retry_attempt = tracing::field::Empty))]
 async fn execute_request_with_retry(
     req: worker::Request,
     provider: &str,
+    key_id: &str,
     max_attempts: u32,
 ) -> Result<RequestResult> {
     let mut retry_attempt = 0;
@@ -85,9 +86,9 @@ async fn execute_request_with_retry(
 
                 if let ErrorAnalysis::TransientServerError = analysis {
                      if retry_attempt + 1 < max_attempts {
-                        warn!(status, "Request failed with transient server error, retrying...");
+                        warn!(status, error_body = %error_body_text, "Request failed with transient server error, retrying...");
                     } else {
-                        warn!(status, "Request failed with transient server error after max attempts");
+                        warn!(status, error_body = %error_body_text, "Request failed with transient server error after max attempts");
                         return Ok(RequestResult::Failure {
                             analysis,
                             body_text: error_body_text,
@@ -96,6 +97,7 @@ async fn execute_request_with_retry(
                     }
                 } else {
                      // Non-transient error, return immediately
+                     warn!(status, error_body = %error_body_text, "Request failed with non-transient error");
                     return Ok(RequestResult::Failure {
                         analysis,
                         body_text: error_body_text,
@@ -239,7 +241,7 @@ async fn make_gateway_request(
 
 
 /// The new unified forwarding function that contains the full routing logic.
-#[instrument(skip_all, fields(request_id = %uuid::Uuid::new_v4()))]
+#[instrument(skip_all, level = "warn", fields(request_id = %uuid::Uuid::new_v4()))]
 #[worker::send]
 pub async fn forward(
     State(state): State<Arc<AppState>>,
@@ -305,7 +307,7 @@ pub async fn forward(
         let mut failover_attempt = 0;
 
         for selected_key in sorted_keys {
-            let key_span = span!(Level::INFO, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
+            let key_span = span!(Level::WARN, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
             let _enter = key_span.enter();
 
             let now = (Date::now() / 1000.0) as u64;
@@ -413,7 +415,7 @@ pub async fn forward(
             };
 
             // --- 5. Execute Request with Retry ---
-            let result = execute_request_with_retry(request_to_execute, &provider, 3).await?;
+            let result = execute_request_with_retry(request_to_execute, &provider, &selected_key.id, 3).await?;
             let latency = (Date::now() - start_time) as i64;
             
             // --- 6. Process Result and Update State ---
@@ -464,7 +466,6 @@ pub async fn forward(
                     body_text,
                     status,
                 } => {
-                    warn!(key_id = selected_key.id, status, error_body = body_text, "Request failed for key, trying next.");
                     last_error_body = body_text;
                     last_error_status = status;
                     last_error_was_cooldown = matches!(analysis, ErrorAnalysis::KeyOnCooldown(_));
@@ -571,7 +572,5 @@ pub async fn forward(
         Err(e) => AxumWorkerError(e).into_response(),
     }
 }
-
-
 
 
