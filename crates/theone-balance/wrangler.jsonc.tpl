@@ -43,7 +43,7 @@
         "CLOUDFLARE_ACCOUNT_ID": "xxxx",
         "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false",
-        "RUST_LOG": "info"
+        "RUST_LOG": "warn"
 
 
     },

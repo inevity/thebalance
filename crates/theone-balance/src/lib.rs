@@ -25,7 +25,7 @@ pub mod state_do_kv;
 #[cfg(feature = "do_sqlite")]
 pub mod state_do_sqlite;
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tower_service::Service;
 use worker::send::SendWrapper;
 use worker::*;
@@ -37,20 +37,11 @@ use tracing_subscriber::{
 };
 use tracing_web::{performance_layer, MakeConsoleWriter};
 
+static START: Once = Once::new();
+
 #[event(start)]
 fn start() {
     console_error_panic_hook::set_once();
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .pretty()
-        .with_ansi(false) // Only partially supported across JavaScript runtimes
-        .with_timer(UtcTime::rfc_3339()) // std::time is not available in browsers
-        .with_writer(MakeConsoleWriter); // write events to the console
-    let perf_layer = performance_layer().with_details_from_fields(Pretty::default());
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
-        .with(fmt_layer)
-        .with(perf_layer)
-        .init();
 }
 
 pub struct AppState {
@@ -68,6 +59,22 @@ pub async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
+    START.call_once(|| {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .pretty()
+            .with_ansi(false)
+            .with_timer(UtcTime::rfc_3339())
+            .with_writer(MakeConsoleWriter);
+        let perf_layer = performance_layer().with_details_from_fields(Pretty::default());
+        let rust_log = env.var("RUST_LOG").map(|v| v.to_string()).unwrap_or_else(|_| "info".to_string());
+
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(rust_log))
+            .with(fmt_layer)
+            .with(perf_layer)
+            .init();
+    });
+
     let app_state = Arc::new(AppState {
         env: SendWrapper::new(env),
         ctx: SendWrapper::new(_ctx),
