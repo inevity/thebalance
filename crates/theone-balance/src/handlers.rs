@@ -173,7 +173,7 @@ fn set_auth_header(headers: &mut worker::Headers, provider: &str, key: &str) -> 
 async fn make_gateway_request(
     method: axum::http::Method,
     headers: &axum::http::HeaderMap,
-    body: Option<Vec<u8>>,
+    body: Option<Bytes>,
     env: &Env,
     rest_resource: &str,
     key: &str,
@@ -232,7 +232,7 @@ async fn make_gateway_request(
     req_init
         .with_method(worker_method)
         .with_headers(new_headers)
-        .with_body(body.map(|b| b.into()));
+        .with_body(body.map(|b| js_sys::Uint8Array::from(b.as_ref()).into()));
 
     worker::Request::new_with_init(&url, &req_init)
 }
@@ -264,13 +264,12 @@ pub async fn forward(
         }
 
         let (parts, body) = req.into_parts();
-        let method = parts.method.clone();
-        let headers = parts.headers.clone();
+        let method = parts.method;
+        let headers = parts.headers;
 
         let body_bytes: Bytes = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(|e| worker::Error::from(e.to_string()))?;
-        let body_bytes = body_bytes.to_vec();
 
         let (provider, model_name) =
             util::extract_provider_and_model(&body_bytes, &rest_resource)?;
@@ -336,7 +335,7 @@ pub async fn forward(
                     // 1. LOCAL OpenAI Embeddings -> Native Gemini Endpoint
                     let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(&body_bytes)?;
                     let gemini_req_body = gcp::translate_embeddings_request(openapi_req, &model_name);
-                    let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
+                    let gemini_body_bytes: Bytes = serde_json::to_vec(&gemini_req_body)?.into();
                     let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents", model_name);
 
                     let mut headers = worker::Headers::new();
@@ -346,14 +345,14 @@ pub async fn forward(
                     req_init
                         .with_method(worker::Method::Post)
                         .with_headers(headers)
-                        .with_body(Some(gemini_body_bytes.into()));
+                        .with_body(Some(js_sys::Uint8Array::from(gemini_body_bytes.as_ref()).into()));
                     (worker::Request::new_with_init(&native_endpoint, &req_init)?, true, false)
 
                 } else if rest_resource.starts_with("compat/chat/completions") {
                     // 2. LOCAL OpenAI Chat -> Native Gemini Endpoint
                     let openapi_req: OpenAiChatCompletionRequest = serde_json::from_slice(&body_bytes)?;
                     let gemini_req = gcp::translate_chat_request(openapi_req);
-                    let gemini_body_bytes = serde_json::to_vec(&gemini_req)?;
+                    let gemini_body_bytes: Bytes = serde_json::to_vec(&gemini_req)?.into();
                     let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
                     let mut headers = worker::Headers::new();
@@ -363,7 +362,7 @@ pub async fn forward(
                     req_init
                         .with_method(worker::Method::Post)
                         .with_headers(headers)
-                        .with_body(Some(gemini_body_bytes.into()));
+                        .with_body(Some(js_sys::Uint8Array::from(gemini_body_bytes.as_ref()).into()));
                     (worker::Request::new_with_init(&native_endpoint, &req_init)?, false, true)
                 } else {
                     // 3. LOCAL Native Passthrough -> Native Gemini Endpoint
@@ -375,28 +374,28 @@ pub async fn forward(
                     req_init
                         .with_method(worker::Method::from(method.to_string()))
                         .with_headers(headers)
-                        .with_body(Some(body_bytes.clone().into()));
+                        .with_body(Some(js_sys::Uint8Array::from(body_bytes.as_ref()).into()));
                     (worker::Request::new_with_init(&native_endpoint, &req_init)?, false, false)
                 }
             } else {
                 // --- PRODUCTION (AI GATEWAY) PATH ---
                 if rest_resource.starts_with("compat/embeddings") {
                      // 4. REMOTE OpenAI Embeddings -> AI Gateway (needs translation)
-                    let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(&body_bytes)?;
-                    let gemini_req_body = gcp::translate_embeddings_request(openapi_req, &model_name);
-                    let gemini_body_bytes = serde_json::to_vec(&gemini_req_body)?;
+                   let openapi_req: OpenAiEmbeddingsRequest = serde_json::from_slice(&body_bytes)?;
+                   let gemini_req_body = gcp::translate_embeddings_request(openapi_req, &model_name);
+                   let gemini_body_bytes: Bytes = serde_json::to_vec(&gemini_req_body)?.into();
                     // The gateway needs the provider-specific path for routing
-                    let provider_rest_resource = format!("google-ai-studio/v1beta/models/{}:batchEmbedContents", model_name);
+                   let provider_rest_resource = format!("google-ai-studio/v1beta/models/{}:batchEmbedContents", model_name);
 
-                    let req = make_gateway_request(
-                        method.clone(),
-                        &headers,
-                        Some(gemini_body_bytes.clone()),
-                        env,
-                        &provider_rest_resource,
-                        &selected_key.key,
-                        &uuid::Uuid::new_v4().to_string(),
-                    ).await?;
+                   let req = make_gateway_request(
+                       method.clone(),
+                       &headers,
+                       Some(gemini_body_bytes),
+                       env,
+                       &provider_rest_resource,
+                       &selected_key.key,
+                       &uuid::Uuid::new_v4().to_string(),
+                   ).await?;
                     (req, true, false)
                 } else {
                     // 5. REMOTE Passthrough (compat/chat or native) -> AI Gateway
