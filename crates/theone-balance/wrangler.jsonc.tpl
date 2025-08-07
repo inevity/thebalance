@@ -46,10 +46,12 @@
         "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false",
         // "RUST_LOG": "warn,one_balance_rust::handlers=info"
-        "RUST_LOG": "info"
-       // "OVERALL_TIMEOUT_MS": 
+        "RUST_LOG": "warn",
+        // "OVERALL_TIMEOUT_MS": "240000", 
+        "OVERALL_TIMEOUT_MS": "40000", 
        // default 25
-       // "TARGET_TIMEOUT_MS":
+       // "TARGET_TIMEOUT_MS": "40000"
+        "TARGET_TIMEOUT_MS": "10000"
        // default 10
     },
     "observability": {
