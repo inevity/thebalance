@@ -37,6 +37,8 @@ pub enum ErrorAnalysis {
     UserError,
     /// The error is a transient server error and a retry may be warranted.
     TransientServerError,
+    /// The provider request timed out.
+    RequestTimeout,
     /// The error is unrecognized.
     Unknown,
 }

@@ -17,6 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 use time::Duration;
 use tower_cookies::{Cookie, Cookies};
+use worker::Date;
 use tracing::{error, info, warn};
 
 
@@ -870,7 +871,7 @@ fn build_copyable_key(key: &str) -> Markup {
 }
 
 fn format_used_time(created_at: u64) -> String {
-    let now = (js_sys::Date::now() / 1000.0) as u64;
+    let now = Date::now().as_millis() / 1000;
     let used_seconds = now.saturating_sub(created_at);
     let days = used_seconds / 86400;
     let hours = (used_seconds % 86400) / 3600;

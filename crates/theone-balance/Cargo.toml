@@ -67,6 +67,9 @@ tracing-subscriber = { version = "0.3", features = ["json"], optional = true }
 console_error_panic_hook = "0.1.7"
 
 # Utilities
+futures-util = "0.3"
+# wasm-timer = "0.2"
+# web-sys = { version = "0.3", features = ["AbortController", "AbortSignal"] }
 uuid = { version = "1.8", features = ["v4", "js"] }
 url = "2.5"
 js-sys = "0.3"

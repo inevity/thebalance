@@ -11,15 +11,19 @@ use crate::{
 #[cfg(feature = "use_queue")]
 use crate::queue::StateUpdate;
 use std::sync::Arc;
+use std::time::Duration;
 use axum::{
     body::Bytes,
     extract::{Path, State},
     response::IntoResponse,
 };
-use js_sys::Date;
+use futures_util::future::{select, Either};
+use futures_util::FutureExt;
 use phf::phf_map;
 use tracing::{error, info, instrument, span, warn, Level};
-use worker::{Context, Env, Response, Result, Delay};
+use worker::{
+    send::SendWrapper, AbortSignal, Context, Date, Delay, Env, Response, Result,
+};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
     "google-ai-studio" => "x-goog-api-key",
@@ -67,6 +71,8 @@ async fn execute_request_with_retry(
     provider: &str,
     key_id: &str,
     max_attempts: u32,
+    timeout_ms: u64,
+    signal: &AbortSignal,
 ) -> Result<RequestResult> {
     let mut retry_attempt = 0;
     loop {
@@ -86,7 +92,38 @@ async fn execute_request_with_retry(
 
         info!(url = %req_clone.url()?, "Attempting to send request to provider");
 
-        match worker::Fetch::Request(req_clone).send().await {
+                let fetch = worker::Fetch::Request(req_clone);
+        let fetch_future = fetch.send_with_signal(signal);
+        let timeout_future = Delay::from(Duration::from_millis(timeout_ms));
+
+        let result = select(fetch_future.boxed_local(), timeout_future.boxed_local()).await;
+
+        let match_result = match result {
+            Either::Left((fetch_result, _)) => fetch_result,
+            Either::Right((_, _)) => {
+                warn!(
+                    "Sub-request timed out after {}ms for key_id: {}",
+                    timeout_ms, key_id
+                );
+
+                // 1. Abort the local fetch: In Rust's async model, when the `select`
+                //    completes, the future that didn't finish is dropped. Dropping
+                //    the `fetch_future` automatically cancels the underlying request.
+                //    So, no explicit `abort()` call is needed here.
+
+                // 2. Return a RequestResult::Failure with a specific timeout error:
+                //    We create a `Failure` variant with our new `RequestTimeout` analysis
+                //    and return it immediately. The failover loop in the `forward` function
+                //    will catch this and move to the next key.
+                return Ok(RequestResult::Failure {
+                    analysis: ErrorAnalysis::RequestTimeout,
+                    body_text: format!("Provider request timed out after {}ms", timeout_ms),
+                    status: 504,
+                });
+            }
+        };
+
+        match match_result {
             Ok(mut resp) => {
                 let status = resp.status_code();
                 if status == 200 {
@@ -312,6 +349,11 @@ pub async fn forward(
             }
         };
 
+        let target_timeout_ms: u64 = match env.var("TARGET_TIMEOUT_MS") {
+            Ok(v) => v.to_string().parse().unwrap_or(10_000),
+            Err(_) => 10_000,
+        };
+
         // --- 3. Iterate Through Keys and Attempt Requests (Failover Loop) ---
         let mut last_error_body = "No active keys were available or all attempts failed.".to_string();
         let mut last_error_status = 503;
@@ -322,7 +364,7 @@ pub async fn forward(
             let key_span = span!(Level::WARN, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
             let _enter = key_span.enter();
 
-            let now = (Date::now() / 1000.0) as u64;
+            let now = Date::now().as_millis() / 1000;
             // Check for model-specific cooldowns
             if let Some(cooldown_end) = selected_key.get_cooldown_end(&model_name) {
                 if now < cooldown_end {
@@ -427,8 +469,8 @@ pub async fn forward(
             };
 
             // --- 5. Execute Request with Retry ---
-            let result = execute_request_with_retry(request_to_execute, &provider, &selected_key.id, 3).await?;
-            let latency = (Date::now() - start_time) as i64;
+            let result = execute_request_with_retry(request_to_execute, &provider, &selected_key.id, 3, target_timeout_ms, &state.signal).await?;
+            let latency = (Date::now().as_millis() - start_time.as_millis()) as i64;
             
             // --- 6. Process Result and Update State ---
             let final_response = match result {
