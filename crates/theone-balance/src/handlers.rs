@@ -73,6 +73,17 @@ async fn execute_request_with_retry(
         tracing::Span::current().record("retry_attempt", retry_attempt);
 
         let req_clone = req.clone()?;
+        
+        // --- START: ADD THIS LOGGING LINE ---
+        let target_url = req_clone.url()?.to_string();
+        info!(
+            "Executing sub-request. Target URL: [{}], Provider: [{}], Key_ID: [{}]",
+            target_url,
+            provider,
+            key_id
+        );
+        // --- END: ADD THIS LOGGING LINE ---
+
         info!(url = %req_clone.url()?, "Attempting to send request to provider");
 
         match worker::Fetch::Request(req_clone).send().await {
