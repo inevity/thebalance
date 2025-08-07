@@ -491,11 +491,10 @@ pub async fn forward(
 
                     match analysis {
                         ErrorAnalysis::KeyIsInvalid => {
-                            // Optimistically update the cache immediately
-                            let mut updated_key = selected_key.clone();
-                            updated_key.status = ApiKeyStatus::Blocked;
-                            error!(key_id = %selected_key.id, "Key identified as invalid. Updating status to Blocked in local cache and D1.");
-                            d1_storage::update_key_in_cache(&provider, updated_key);
+                            // Flag the key for immediate cooldown in the local cache to prevent retries in this request.
+                            // We use a long duration as a safeguard. The permanent block is handled by the D1 update.
+                            d1_storage::flag_key_with_cooldown(&selected_key.id, 300);
+
 
                             // Dispatch the database update to the background
                             let state_clone = state.clone();
@@ -515,12 +514,8 @@ pub async fn forward(
                             });
                         }
                         ErrorAnalysis::KeyOnCooldown { cooldown_seconds } => {
-                             // Optimistically update the cache immediately
-                             let mut updated_key = selected_key.clone();
-                             let cooldown_end = (Date::now() / 1000.0) as u64 + cooldown_seconds;
-                             updated_key.model_coolings.insert(model_name.clone(), cooldown_end);
-                             info!(key_id = %selected_key.id, model = %model_name, "Updating cooldown for key in local cache.");
-                             d1_storage::update_key_in_cache(&provider, updated_key);
+                            // Flag the key for immediate cooldown in the local cache.
+                            d1_storage::flag_key_with_cooldown(&selected_key.id, cooldown_seconds);
 
                              // Dispatch the database update to the background
                              let state_clone = state.clone();

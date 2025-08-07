@@ -14,7 +14,7 @@ use worker::D1Database;
 use toasty::Error as ToastyError;
 use std::result::Result as StdResult;
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, instrument};
 use mini_moka::sync::Cache;
 use once_cell::sync::Lazy;
 use std::time::Duration;
@@ -22,6 +22,13 @@ use std::time::Duration;
 static API_KEY_CACHE: Lazy<Cache<String, Vec<ApiKey>>> = Lazy::new(|| {
     Cache::builder()
         .time_to_live(Duration::from_secs(60))
+        .build()
+});
+
+// The new "Penalty Box" cache.
+static COOLDOWN_CACHE: Lazy<Cache<String, ()>> = Lazy::new(|| {
+    Cache::builder()
+        .max_capacity(10_000)
         .build()
 });
 
@@ -199,10 +206,26 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> StdResult<(), Sto
     }
     let executor = get_executor(db);
 
-    // Use filter with in_set for multiple IDs
-    let query = DbKey::filter(DbKey::FIELDS.id.in_set(ids));
+    // First, fetch the keys to be deleted so we can find out their providers.
+    let keys_to_delete = executor.exec_query(
+        DbKey::filter(DbKey::FIELDS.id.in_set(ids.clone()))
+    ).await?;
 
-    executor.exec_delete(query.into_select().delete()).await?;
+    // Collect all unique provider names from the keys being deleted.
+    let providers_to_invalidate: HashSet<String> = keys_to_delete
+        .into_iter()
+        .map(|k| k.provider)
+        .collect();
+
+    // Invalidate the cache for each affected provider.
+    for provider in providers_to_invalidate {
+        API_KEY_CACHE.invalidate(&provider);
+    }
+
+    // Use filter with in_set for multiple IDs
+    let delete_query = DbKey::filter(DbKey::FIELDS.id.in_set(ids));
+    executor.exec_delete(delete_query.into_select().delete()).await?;
+
     Ok(())
 }
 
@@ -212,6 +235,8 @@ pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> StdResult<()
     let query = DbKey::filter_by_provider(provider.to_string())
         .filter_by_status("blocked".to_string());
 
+    // Invalidate the cache for this provider since we are deleting keys.
+    API_KEY_CACHE.invalidate(&provider.to_string());
     executor.exec_delete(query.into_select().delete()).await?;
     Ok(())
 }
@@ -276,27 +301,42 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
     Ok(active_keys)
 }
 
-pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    if let Some(keys) = API_KEY_CACHE.get(&provider.to_string()) {
-        return Ok(keys);
-    }
+pub async fn get_healthy_sorted_keys_via_cache(
+    db: &D1Database,
+    provider: &str,
+) -> StdResult<Vec<ApiKey>, StorageError> {
+    // Step 1: Get the potentially stale list of all keys from the main cache.
+    let all_cached_keys = if let Some(keys) = API_KEY_CACHE.get(&provider.to_string()) {
+        keys
+    } else {
+        // Or fetch from D1 if the main cache is empty.
+        let keys_from_db = get_healthy_sorted_keys(db, provider).await?;
+        info!(provider, "Cache miss for provider. Populating cache from D1 with {} keys.", keys_from_db.len());
+        API_KEY_CACHE.insert(provider.to_string(), keys_from_db.clone());
+        keys_from_db
+    };
 
-    let keys = get_healthy_sorted_keys(db, provider).await?;
-    info!(provider, "Cache miss for provider. Populating cache from D1 with {} keys.", keys.len());
-    API_KEY_CACHE.insert(provider.to_string(), keys.clone());
+    // Step 2: NEW - Filter the list in-memory against the cooldown cache.
+    let currently_usable_keys: Vec<ApiKey> = all_cached_keys
+        .into_iter()
+        .filter(|key| {
+            // A key is usable if its ID is NOT in the cooldown cache.
+            let is_on_cooldown = COOLDOWN_CACHE.get(&key.id).is_some();
+            if is_on_cooldown {
+                info!(key_id = %key.id, "Skipping key in local cache due to active cooldown.");
+            }
+            !is_on_cooldown
+        })
+        .collect();
 
-    Ok(keys)
+    Ok(currently_usable_keys)
 }
 
-pub fn update_key_in_cache(provider: &str, updated_key: ApiKey) {
-    if let Some(mut keys) = API_KEY_CACHE.get(&provider.to_string()) {
-        if let Some(key_to_update) = keys.iter_mut().find(|k| k.id == updated_key.id) {
-            *key_to_update = updated_key;
-            // Re-insert the modified Vec back into the cache.
-            API_KEY_CACHE.insert(provider.to_string(), keys);
-        }
-    }
+pub fn flag_key_with_cooldown(key_id: &str, duration_seconds: u64) {
+    info!(key_id, duration_seconds, "Flagging key for temporary cooldown in local cache.");
+    COOLDOWN_CACHE.insert_with_ttl(key_id.to_string(), (), Duration::from_secs(duration_seconds));
 }
+
 
 
 
@@ -307,10 +347,9 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> S
     let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
     
     if let Some(key) = existing {
-        let mut updated_key = db_key_to_api_key(key);
-        updated_key.status = status;
-        update_key_in_cache(&updated_key.provider.clone(), updated_key);
-        
+        // Invalidate the main cache since this key's permanent status has changed.
+        API_KEY_CACHE.invalidate(&key.provider);
+
         // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
             "active".to_string()
@@ -408,9 +447,6 @@ pub async fn set_key_model_cooldown_if_available(
         
         executor.exec_update(update_query.stmt).await?;
 
-        key.total_cooling_seconds = new_total_cooling_seconds;
-        let updated_api_key = db_key_to_api_key(key);
-        update_key_in_cache(provider, updated_api_key);
         
         Ok(true)
     } else {
@@ -492,14 +528,6 @@ pub async fn update_key_metrics(
         
         executor.exec_update(update_query.stmt).await?;
         
-        let mut updated_api_key = db_key_to_api_key(key);
-        updated_api_key.latency_ms = new_latency;
-        updated_api_key.success_rate = new_success_rate as f64 / 1000.0;
-        updated_api_key.consecutive_failures = new_consecutive_failures;
-        updated_api_key.last_checked_at = new_last_checked_at as u64;
-        updated_api_key.last_succeeded_at = new_last_succeeded_at as u64;
-        updated_api_key.updated_at = now as u64;
-        update_key_in_cache(&updated_api_key.provider.clone(), updated_api_key);
     }
 
     Ok(())
