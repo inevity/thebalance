@@ -124,10 +124,10 @@ async fn execute_request_with_retry(
 
         // If we've reached here, it's a retryable error. Calculate delay and continue.
         retry_attempt += 1;
-        let delay = std::time::Duration::from_millis(100 * 2_u64.pow(retry_attempt + 1));
-        let jitter = std::time::Duration::from_millis(rand::random::<u64>() % 100);
-        let delay_duration = delay + jitter;
-        Delay::from(delay_duration).await;
+        let delay_millis = 100 * 2_u64.pow(retry_attempt + 1);
+        let jitter_millis = rand::random::<u64>() % 100;
+        let total_delay_millis = delay_millis + jitter_millis;
+        Delay::from(std::time::Duration::from_millis(total_delay_millis)).await;
     }
 }
 
@@ -469,7 +469,7 @@ pub async fn forward(
                 } => {
                     last_error_body = body_text;
                     last_error_status = status;
-                    last_error_was_cooldown = matches!(analysis, ErrorAnalysis::KeyOnCooldown(_));
+                    last_error_was_cooldown = matches!(analysis, ErrorAnalysis::KeyOnCooldown {..});
 
                     // Update state based on the specific error analysis.
                     let state_clone = state.clone();
@@ -495,7 +495,7 @@ pub async fn forward(
                             let mut updated_key = selected_key.clone();
                             updated_key.status = ApiKeyStatus::Blocked;
                             error!(key_id = %selected_key.id, "Key identified as invalid. Updating status to Blocked in local cache and D1.");
-                            d1_storage::update_key_in_cache(&provider, updated_key).await;
+                            d1_storage::update_key_in_cache(&provider, updated_key);
 
                             // Dispatch the database update to the background
                             let state_clone = state.clone();
@@ -514,13 +514,13 @@ pub async fn forward(
                                 }
                             });
                         }
-                        ErrorAnalysis::KeyOnCooldown(duration) => {
+                        ErrorAnalysis::KeyOnCooldown { cooldown_seconds } => {
                              // Optimistically update the cache immediately
                              let mut updated_key = selected_key.clone();
-                             let cooldown_end = (Date::now() / 1000.0) as u64 + duration.as_secs();
+                             let cooldown_end = (Date::now() / 1000.0) as u64 + cooldown_seconds;
                              updated_key.model_coolings.insert(model_name.clone(), cooldown_end);
                              info!(key_id = %selected_key.id, model = %model_name, "Updating cooldown for key in local cache.");
-                             d1_storage::update_key_in_cache(&provider, updated_key).await;
+                             d1_storage::update_key_in_cache(&provider, updated_key);
 
                              // Dispatch the database update to the background
                              let state_clone = state.clone();
@@ -530,7 +530,7 @@ pub async fn forward(
                              #[cfg(feature="wait_until")]
                              state.ctx.wait_until(async move {
                                 if let Ok(db) = state_clone.env.d1("DB") {
-                                    let fut = d1_storage::set_key_model_cooldown_if_available(&db, &key_id, &provider, &model_name, duration.as_secs());
+                                    let fut = d1_storage::set_key_model_cooldown_if_available(&db, &key_id, &provider, &model_name, cooldown_seconds);
                                     if let Err(e) = fut.await {
                                         error!("Failed to set key cooldown: {}", e);
                                     }

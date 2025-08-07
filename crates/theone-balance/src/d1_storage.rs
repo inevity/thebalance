@@ -15,14 +15,13 @@ use toasty::Error as ToastyError;
 use std::result::Result as StdResult;
 use thiserror::Error;
 use tracing::info;
-use moka::future::Cache as MokaCache;
+use mini_moka::sync::Cache;
 use once_cell::sync::Lazy;
 use std::time::Duration;
 
-static API_KEY_CACHE: Lazy<MokaCache<String, Vec<ApiKey>>> = Lazy::new(|| {
-    MokaCache::builder()
+static API_KEY_CACHE: Lazy<Cache<String, Vec<ApiKey>>> = Lazy::new(|| {
+    Cache::builder()
         .time_to_live(Duration::from_secs(60))
-        .name("api-key-cache")
         .build()
 });
 
@@ -189,7 +188,7 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdRes
     }
 
     // Invalidate the cache for this provider since we've added new keys.
-    API_KEY_CACHE.invalidate(provider).await;
+    API_KEY_CACHE.invalidate(&provider.to_string());
 
     Ok(())
 }
@@ -278,23 +277,23 @@ pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<A
 }
 
 pub async fn get_healthy_sorted_keys_via_cache(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    if let Some(keys) = API_KEY_CACHE.get(provider).await {
+    if let Some(keys) = API_KEY_CACHE.get(&provider.to_string()) {
         return Ok(keys);
     }
 
     let keys = get_healthy_sorted_keys(db, provider).await?;
     info!(provider, "Cache miss for provider. Populating cache from D1 with {} keys.", keys.len());
-    API_KEY_CACHE.insert(provider.to_string(), keys.clone()).await;
+    API_KEY_CACHE.insert(provider.to_string(), keys.clone());
 
     Ok(keys)
 }
 
-pub async fn update_key_in_cache(provider: &str, updated_key: ApiKey) {
-    if let Some(mut keys) = API_KEY_CACHE.get(provider).await {
+pub fn update_key_in_cache(provider: &str, updated_key: ApiKey) {
+    if let Some(mut keys) = API_KEY_CACHE.get(&provider.to_string()) {
         if let Some(key_to_update) = keys.iter_mut().find(|k| k.id == updated_key.id) {
             *key_to_update = updated_key;
             // Re-insert the modified Vec back into the cache.
-            API_KEY_CACHE.insert(provider.to_string(), keys).await;
+            API_KEY_CACHE.insert(provider.to_string(), keys);
         }
     }
 }
@@ -310,7 +309,7 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> S
     if let Some(key) = existing {
         let mut updated_key = db_key_to_api_key(key);
         updated_key.status = status;
-        update_key_in_cache(&updated_key.provider.clone(), updated_key).await;
+        update_key_in_cache(&updated_key.provider.clone(), updated_key);
         
         // Use toasty's update query
         let status_str = if status == ApiKeyStatus::Active {
@@ -411,7 +410,7 @@ pub async fn set_key_model_cooldown_if_available(
 
         key.total_cooling_seconds = new_total_cooling_seconds;
         let updated_api_key = db_key_to_api_key(key);
-        update_key_in_cache(provider, updated_api_key).await;
+        update_key_in_cache(provider, updated_api_key);
         
         Ok(true)
     } else {
@@ -500,7 +499,7 @@ pub async fn update_key_metrics(
         updated_api_key.last_checked_at = new_last_checked_at as u64;
         updated_api_key.last_succeeded_at = new_last_succeeded_at as u64;
         updated_api_key.updated_at = now as u64;
-        update_key_in_cache(&updated_api_key.provider.clone(), updated_api_key).await;
+        update_key_in_cache(&updated_api_key.provider.clone(), updated_api_key);
     }
 
     Ok(())

@@ -3,7 +3,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response as AxumResponse};
 use crate::models::GoogleErrorResponse;
-use std::time::Duration;
 use worker::{Error as WorkerError, Response as WorkerResponse};
 use tracing::info;
 
@@ -33,7 +32,7 @@ pub enum ErrorAnalysis {
     /// The key is invalid and should be disabled.
     KeyIsInvalid,
     /// The key is rate-limited and should be put on cooldown for a specific duration.
-    KeyOnCooldown(Duration),
+    KeyOnCooldown { cooldown_seconds: u64 },
     /// The error is not key-related and should be returned to the client.
     UserError,
     /// The error is a transient server error and a retry may be warranted.
@@ -50,14 +49,14 @@ pub fn analyze_google_error(error_body: &GoogleErrorResponse) -> ErrorAnalysis {
                 if let Some(delay_str) = &detail.retry_delay {
                     let seconds = delay_str.trim_end_matches('s').parse().unwrap_or(DEFAULT_COOLDOWN_SECONDS);
                     // Add a small buffer to the suggested delay
-                    return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(seconds + 5));
+                    return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: seconds + 5 };
                 }
             },
             "type.googleapis.com/google.rpc.ErrorInfo" => {
                 if let Some(reason) = &detail.reason {
                     match reason.as_str() {
                         "API_KEY_INVALID" => return ErrorAnalysis::KeyIsInvalid,
-                        "RATE_LIMIT_EXCEEDED" => return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DEFAULT_COOLDOWN_SECONDS)),
+                        "RATE_LIMIT_EXCEEDED" => return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS },
                         _ => continue,
                     }
                 }
@@ -66,7 +65,7 @@ pub fn analyze_google_error(error_body: &GoogleErrorResponse) -> ErrorAnalysis {
                 for violation in &detail.violations {
                     if let Some(quota_id) = &violation.quota_id {
                         if quota_id.contains("PerDay") {
-                            return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DAILY_COOLDOWN_SECONDS));
+                            return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DAILY_COOLDOWN_SECONDS };
                         }
                     }
                 }
@@ -78,12 +77,12 @@ pub fn analyze_google_error(error_body: &GoogleErrorResponse) -> ErrorAnalysis {
     // If we've looped through all details and found nothing specific,
     // check for a top-level status that might indicate a daily quota.
     if error_body.error.message.to_lowercase().contains("quota") && error_body.error.message.to_lowercase().contains("day") {
-         return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DAILY_COOLDOWN_SECONDS));
+         return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DAILY_COOLDOWN_SECONDS };
     }
 
 
     // Fallback for generic 429s that don't match our specific checks.
-    ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DEFAULT_COOLDOWN_SECONDS))
+    ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS }
 }
 
 /// A simpler check for 400 Bad Request errors to see if they are due to an invalid key.
@@ -135,7 +134,7 @@ pub async fn analyze_provider_error(provider: &str, status: u16, body_text: &str
                 return analyze_google_error(&error_body);
             }
             // Fallback for other providers
-            return ErrorAnalysis::KeyOnCooldown(Duration::from_secs(DEFAULT_COOLDOWN_SECONDS));
+            return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS };
         }
         500 | 502 | 503 | 504 => {
             return ErrorAnalysis::TransientServerError;
