@@ -448,17 +448,23 @@ pub async fn forward(
                         })
                         .await?;
 
-                    // Translate response if needed
-                    if needs_embeddings_resp_translation {
-                        let gemini_resp: GeminiEmbeddingsResponse = resp.json().await?;
-                        let openapi_resp =
-                            gcp::translate_embeddings_response(gemini_resp, &model_name);
-                        Response::from_json(&openapi_resp)?
-                    } else if needs_chat_resp_translation {
-                         let gemini_resp: gcp::GeminiChatResponse = resp.json().await?;
-                         let openapi_resp = gcp::translate_chat_response(gemini_resp, &model_name);
+                     // Translate response if needed
+                     if needs_embeddings_resp_translation {
+                         let gemini_resp: GeminiEmbeddingsResponse = resp.json().await?;
+                         let openapi_resp =
+                             gcp::translate_embeddings_response(gemini_resp, &model_name);
                          Response::from_json(&openapi_resp)?
-                    } else {
+                     } else if needs_chat_resp_translation {
+                        let body_bytes = resp.bytes().await?;
+                        let Ok(gemini_resp) = serde_json::from_slice::<gcp::GeminiChatResponse>(&body_bytes) else {
+                            // This is likely an error response from Google.
+                            // We should forward it directly to the user.
+                            warn!("Got response status_code from google: {}", resp.status_code());
+                            return Ok(AxumWorkerResponse(Response::from_bytes(body_bytes)?.with_status(resp.status_code())).into_response());
+                        };
+                          let openapi_resp = gcp::translate_chat_response(gemini_resp, &model_name);
+                          Response::from_json(&openapi_resp)?
+                     } else {
                         resp
                     }
                 }
