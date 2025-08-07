@@ -1,0 +1,7 @@
+# .wranglerignore
+target/
+Cargo.lock
+*.log
+.env.local
+wrangler.jsonc
+migrations

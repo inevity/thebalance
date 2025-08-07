@@ -10,6 +10,8 @@
     "build": {
         // "command": "RUST_BACKTRACE=1 cargo install -q worker-build && worker-build --release"
         "command": "cargo install -q worker-build && worker-build --release"
+       // "command": "cargo install -q worker-build && worker-build --release",
+       // "watch_dir": ["src"]
     },
     "ai": {
         "binding": "AI"
@@ -54,5 +56,12 @@
       "enabled": true,
       "head_sampling_rate": 1
     }
+//    "env": {
+//      "dev": {
+//        "build": {
+//          "watch_ignore": ["wrangler.jsonc", "./migrations/schema.sql"]
+//        }
+//      }
+//    }
 
 }
