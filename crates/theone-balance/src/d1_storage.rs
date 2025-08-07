@@ -141,32 +141,31 @@ pub async fn list_keys(
 pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
-    let new_keys: Vec<String> = keys_str
+    // Parse and deduplicate the input keys first.
+    let mut unique_new_keys: HashSet<String> = keys_str
         .split(|c| c == '\n' || c == ',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
 
-    if new_keys.is_empty() {
+    if unique_new_keys.is_empty() {
         return Ok(());
     }
 
-    // Fetch existing keys for the provider to avoid duplicates.
+    // Fetch existing keys for the provider to find which ones we actually need to add.
     let existing_db_keys = executor.exec_query(
         DbKey::filter_by_provider(provider.to_string())
     ).await?;
     
-    let existing_keys_set: HashSet<String> = existing_db_keys.into_iter().map(|k| k.key).collect();
+    // Remove any keys that already exist in the database from our set of new keys.
+    for existing_key in existing_db_keys {
+        unique_new_keys.remove(&existing_key.key);
+    }
 
     let now = (Date::now() / 1000.0) as i64;
     
-    // Insert keys individually since CreateMany needs a Db instance
-    for key in new_keys {
-        if existing_keys_set.contains(&key) {
-            // Key already exists, skip it.
-            continue;
-        }
-
+    // Insert only the truly new keys.
+    for key in unique_new_keys {
         let id_str = Uuid::new_v4().to_string();
         let untyped_id = toasty_core::stmt::Id::from_string(DbKey::ID, id_str);
         let typed_id = toasty::stmt::Id::from_untyped(untyped_id);
