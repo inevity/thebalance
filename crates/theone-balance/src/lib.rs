@@ -1,3 +1,9 @@
+// Override the console_debug macro to do nothing
+#[macro_export]
+macro_rules! console_debug {
+    ($($arg:tt)*) => {};
+}
+
 // Declare all our modules. The feature flags ensure only the code
 // for the active strategy is included in the final binary.
 pub mod dbmodels;
@@ -60,7 +66,6 @@ pub struct AppState {
 // pub struct DummyAppState {
 //     pub dummy: String,
 // }
-
 
 #[event(fetch)]
 pub async fn fetch(
