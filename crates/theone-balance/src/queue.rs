@@ -1,7 +1,7 @@
 use crate::state::strategy::ApiKeyStatus;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
-use worker::{event, Env, MessageExt, Result, Stub};
+use worker::{event, Env, MessageExt, Result};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum StateUpdate {

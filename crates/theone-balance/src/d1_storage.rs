@@ -4,7 +4,6 @@
 use crate::dbmodels::{Key as DbKey, ModelCooling};
 use toasty::Model;
 use crate::hybrid::{get_schema, HybridExecutor};
-use crate::hybrid::update_support::IntoUpdateStatement;
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
 use js_sys::Date;
 use serde_json;
@@ -14,7 +13,7 @@ use worker::D1Database;
 use toasty::Error as ToastyError;
 use std::result::Result as StdResult;
 use thiserror::Error;
-use tracing::{info, instrument};
+use tracing::{info};
 use mini_moka::sync::Cache;
 use once_cell::sync::Lazy;
 use std::time::Duration;
@@ -53,7 +52,6 @@ impl From<StorageError> for worker::Error {
 
 
 use uuid::Uuid;
-use toasty::stmt::Id;
 
 /// Convert a DbKey to an ApiKey
 fn db_key_to_api_key(db_key: DbKey) -> ApiKey {

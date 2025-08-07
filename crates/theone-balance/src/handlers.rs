@@ -6,7 +6,6 @@ use crate::{
     gcp, models::*,
     state::strategy::*,
     util, AppState,
-    dbmodels::ModelCooling,
 };
 #[cfg(feature = "use_queue")]
 use crate::queue::StateUpdate;
@@ -21,9 +20,7 @@ use futures_util::future::{select, Either};
 use futures_util::FutureExt;
 use phf::phf_map;
 use tracing::{error, info, instrument, span, warn, Level};
-use worker::{
-    send::SendWrapper, AbortSignal, Context, Date, Delay, Env, Response, Result,
-};
+use worker::{AbortSignal, Date, Delay, Env, Response, Result};
 
 static PROVIDER_CUSTOM_AUTH_HEADER: phf::Map<&'static str, &'static str> = phf_map! {
     "google-ai-studio" => "x-goog-api-key",
