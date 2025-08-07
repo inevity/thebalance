@@ -346,10 +346,15 @@ pub async fn forward(
             }
         };
 
+        let overall_timeout_ms: u64 = match env.var("OVERALL_TIMEOUT_MS") {
+            Ok(v) => v.to_string().parse().unwrap_or(25_000),
+            Err(_) => 25_000,
+        };
         let target_timeout_ms: u64 = match env.var("TARGET_TIMEOUT_MS") {
             Ok(v) => v.to_string().parse().unwrap_or(10_000),
             Err(_) => 10_000,
         };
+        let request_start_time = Date::now();
 
         // --- 3. Iterate Through Keys and Attempt Requests (Failover Loop) ---
         let mut last_error_body = "No active keys were available or all attempts failed.".to_string();
@@ -360,6 +365,26 @@ pub async fn forward(
         for selected_key in &sorted_keys {
             let key_span = span!(Level::WARN, "key_failover", failover_attempt, key_id = %selected_key.id, key_part = %util::partially_redact_key(&selected_key.key));
             let _enter = key_span.enter();
+
+            // --- Dynamic Timeout Calculation ---
+            let elapsed_ms = Date::now().as_millis() - request_start_time.as_millis();
+            let remaining_ms = overall_timeout_ms.saturating_sub(elapsed_ms);
+
+            // Leave a small buffer (e.g., 500ms) to ensure the top-level timeout doesn't race us.
+            if remaining_ms < 500 {
+                warn!("Overall request time limit reached. Stopping failover.");
+                break;
+            }
+
+            let attempt_timeout_ms = std::cmp::min(target_timeout_ms, remaining_ms.saturating_sub(500));
+            if attempt_timeout_ms == 0 {
+                warn!("Not enough time remaining for another attempt.");
+                break;
+            }
+            info!(
+                "Attempting request with timeout of {}ms (remaining: {}ms)",
+                attempt_timeout_ms, remaining_ms
+            );
 
             let now = Date::now().as_millis() / 1000;
             // Check for model-specific cooldowns
@@ -466,7 +491,7 @@ pub async fn forward(
             };
 
             // --- 5. Execute Request with Retry ---
-            let result = execute_request_with_retry(request_to_execute, &provider, &selected_key.id, 3, target_timeout_ms, &state.signal).await?;
+            let result = execute_request_with_retry(request_to_execute, &provider, &selected_key.id, 3, attempt_timeout_ms, &state.signal).await?;
             let latency = (Date::now().as_millis() - start_time.as_millis()) as i64;
             
             // --- 6. Process Result and Update State ---
