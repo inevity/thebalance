@@ -130,9 +130,13 @@ async fn execute_request_with_retry(
                 let error_body_text = resp.text().await?;
                 let analysis = error_handling::analyze_provider_error(provider, status, &error_body_text).await;
 
+                // --- Refactored Error Handling Logic ---
+
+                // Case 1: The error is a transient server error, and we should retry the same key.
                 if let ErrorAnalysis::TransientServerError = analysis {
-                     if retry_attempt + 1 < max_attempts {
+                    if retry_attempt + 1 < max_attempts {
                         warn!(status, error_body = %error_body_text, "Request failed with transient server error, retrying...");
+                        // The loop will continue to the next iteration automatically.
                     } else {
                         warn!(status, error_body = %error_body_text, "Request failed with transient server error after max attempts");
                         return Ok(RequestResult::Failure {
@@ -141,9 +145,18 @@ async fn execute_request_with_retry(
                             status,
                         });
                     }
+                // Case 2: The error is a cooldown/rate-limit or invalid key. We should NOT retry this key.
+                // We return immediately so the outer loop can failover to the next key.
+                } else if matches!(analysis, ErrorAnalysis::KeyOnCooldown { .. } | ErrorAnalysis::KeyIsInvalid) {
+                     warn!(status, error_body = %error_body_text, "Request failed with key-specific issue (cooldown or invalid). Failing over.");
+                     return Ok(RequestResult::Failure {
+                        analysis,
+                        body_text: error_body_text,
+                        status,
+                    });
+                // Case 3: All other errors (UserError, Unknown) are considered fatal for the request.
                 } else {
-                     // Non-transient error, return immediately
-                     warn!(status, error_body = %error_body_text, "Request failed with non-transient error");
+                     warn!(status, error_body = %error_body_text, "Request failed with non-transient, non-key-related error.");
                     return Ok(RequestResult::Failure {
                         analysis,
                         body_text: error_body_text,

@@ -1,11 +1,10 @@
 //! This module contains logic for analyzing provider and gateway errors.
 
+use crate::models::GoogleErrorResponse;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response as AxumResponse};
-use crate::models::GoogleErrorResponse;
-use worker::{Error as WorkerError, Response as WorkerResponse};
 use tracing::info;
-
+use worker::{Error as WorkerError, Response as WorkerResponse};
 
 // --- Newtype Wrappers to solve the Orphan Rule ---
 
@@ -49,47 +48,63 @@ pub fn analyze_google_error(error_body: &GoogleErrorResponse) -> ErrorAnalysis {
         match detail.type_url.as_str() {
             "type.googleapis.com/google.rpc.RetryInfo" => {
                 if let Some(delay_str) = &detail.retry_delay {
-                    let seconds = delay_str.trim_end_matches('s').parse().unwrap_or(DEFAULT_COOLDOWN_SECONDS);
+                    let seconds = delay_str
+                        .trim_end_matches('s')
+                        .parse()
+                        .unwrap_or(DEFAULT_COOLDOWN_SECONDS);
                     // Add a small buffer to the suggested delay
-                    return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: seconds + 5 };
+                    return ErrorAnalysis::KeyOnCooldown {
+                        cooldown_seconds: seconds + 5,
+                    };
                 }
-            },
+            }
             "type.googleapis.com/google.rpc.ErrorInfo" => {
                 if let Some(reason) = &detail.reason {
                     match reason.as_str() {
                         "API_KEY_INVALID" => return ErrorAnalysis::KeyIsInvalid,
-                        "RATE_LIMIT_EXCEEDED" => return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS },
+                        "RATE_LIMIT_EXCEEDED" => {
+                            return ErrorAnalysis::KeyOnCooldown {
+                                cooldown_seconds: DEFAULT_COOLDOWN_SECONDS,
+                            }
+                        }
                         _ => continue,
                     }
                 }
-            },
+            }
             "type.googleapis.com/google.rpc.QuotaFailure" => {
                 for violation in &detail.violations {
                     if let Some(quota_id) = &violation.quota_id {
                         if quota_id.contains("PerDay") {
-                            return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DAILY_COOLDOWN_SECONDS };
+                            return ErrorAnalysis::KeyOnCooldown {
+                                cooldown_seconds: DAILY_COOLDOWN_SECONDS,
+                            };
                         }
                     }
                 }
-            },
+            }
             _ => continue,
         }
     }
 
     // If we've looped through all details and found nothing specific,
     // check for a top-level status that might indicate a daily quota.
-    if error_body.error.message.to_lowercase().contains("quota") && error_body.error.message.to_lowercase().contains("day") {
-         return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DAILY_COOLDOWN_SECONDS };
+    if error_body.error.message.to_lowercase().contains("quota")
+        && error_body.error.message.to_lowercase().contains("day")
+    {
+        return ErrorAnalysis::KeyOnCooldown {
+            cooldown_seconds: DAILY_COOLDOWN_SECONDS,
+        };
     }
 
-
     // Fallback for generic 429s that don't match our specific checks.
-    ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS }
+    ErrorAnalysis::KeyOnCooldown {
+        cooldown_seconds: DEFAULT_COOLDOWN_SECONDS,
+    }
 }
 
 /// A simpler check for 400 Bad Request errors to see if they are due to an invalid key.
 pub fn key_is_invalid_from_error(error_body: &GoogleErrorResponse) -> bool {
-     for detail in &error_body.error.details {
+    for detail in &error_body.error.details {
         if detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo" {
             if let Some(reason) = &detail.reason {
                 if reason == "API_KEY_INVALID" {
@@ -126,8 +141,8 @@ pub async fn analyze_provider_error(provider: &str, status: u16, body_text: &str
             if provider == "google-ai-studio" {
                 // Google can return a single error object or an array with one object.
                 // We try to parse as a single object first, and fall back to the array.
-                let error_body: GoogleErrorResponse =
-                    serde_json::from_str(body_text).unwrap_or_else(|_| {
+                let error_body: GoogleErrorResponse = serde_json::from_str(body_text)
+                    .unwrap_or_else(|_| {
                         serde_json::from_str::<Vec<GoogleErrorResponse>>(body_text)
                             .ok()
                             .and_then(|mut v| v.pop())
@@ -136,12 +151,13 @@ pub async fn analyze_provider_error(provider: &str, status: u16, body_text: &str
                 return analyze_google_error(&error_body);
             }
             // Fallback for other providers
-            return ErrorAnalysis::KeyOnCooldown { cooldown_seconds: DEFAULT_COOLDOWN_SECONDS };
+            return ErrorAnalysis::KeyOnCooldown {
+                cooldown_seconds: DEFAULT_COOLDOWN_SECONDS,
+            };
         }
-        500 | 502 | 503 | 504 => {
+        500 | 502 | 504 => {
             return ErrorAnalysis::TransientServerError;
         }
         _ => ErrorAnalysis::Unknown,
     }
 }
-
