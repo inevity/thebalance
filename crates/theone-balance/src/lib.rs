@@ -61,7 +61,6 @@ pub struct AppState {
 //     pub dummy: String,
 // }
 
-const OVERALL_TIMEOUT_MS: u64 = 25_000;
 
 #[event(fetch)]
 pub async fn fetch(
