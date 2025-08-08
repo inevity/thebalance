@@ -461,16 +461,30 @@ async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<V
     let all_active_keys = get_active_keys(db, provider).await?;
     info!(provider, "Initial DB query returned {} active keys before circuit breaker filter.", all_active_keys.len());
 
+    let now = (Date::now() / 1000.0) as u64;
+    const RECOVERY_PERIOD_SECONDS: u64 = 3600; // 1 hour
+
     let mut active_keys: Vec<ApiKey> = all_active_keys
         .into_iter()
-        .filter(|key| key.consecutive_failures < 5) // Circuit breaker
+        .filter(|key| {
+            if key.consecutive_failures < 5 {
+                true // Key is healthy, include it.
+            } else {
+                // Key has failed 5+ times. Check if it's time for another chance.
+                let time_since_last_check = now.saturating_sub(key.last_checked_at);
+                if time_since_last_check > RECOVERY_PERIOD_SECONDS {
+                    info!(key_id = %key.id, "Key has been sidelined for over 1 hour. Adding to probationary pool.");
+                    true // Give it a chance.
+                } else {
+                    false // Still in the penalty box.
+                }
+            }
+        })
         .collect();
 
     if active_keys.is_empty() {
         return Ok(Vec::new());
     }
-
-    let now = (Date::now() / 1000.0) as u64;
     
     // Define a helper closure to calculate score
     let calculate_health_score = |key: &ApiKey| -> i64 {
