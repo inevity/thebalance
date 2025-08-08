@@ -553,3 +553,27 @@ pub async fn update_key_metrics(
 
     Ok(())
 }
+
+pub async fn delete_permanently_failed_keys(db: &D1Database, provider: &str) -> StdResult<usize, StorageError> {
+    const PERMANENTLY_FAILED_THRESHOLD: i64 = 100; // Define a high failure count
+    let executor = get_executor(db);
+
+    info!(provider, "Running cleanup task for permanently failed keys...");
+
+    let query = DbKey::filter_by_provider(provider.to_string())
+        .filter_by_status("active".to_string())
+        .filter(DbKey::FIELDS.consecutive_failures.gt(PERMANENTLY_FAILED_THRESHOLD));
+
+    let keys_to_delete = executor.exec_query(query).await?;
+    let count = keys_to_delete.len();
+
+    if count > 0 {
+        let ids_to_delete: Vec<String> = keys_to_delete.into_iter().map(|k| k.id.to_string()).collect();
+        info!(provider, "Found {} keys with over {} consecutive failures. Deleting them.", count, PERMANENTLY_FAILED_THRESHOLD);
+        delete_keys(db, ids_to_delete).await?;
+    } else {
+        info!(provider, "No permanently failed keys found to delete.");
+    }
+
+    Ok(count)
+}
