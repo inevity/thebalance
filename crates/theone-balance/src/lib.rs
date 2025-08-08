@@ -139,6 +139,36 @@ pub async fn fetch(
 // We also add a scheduled event handler to satisfy the build warning.
 // This worker doesn't use scheduled events, so this is just a placeholder.
 #[event(scheduled)]
-pub async fn scheduled(_event: ScheduledEvent, _env: Env, _ctx: ScheduleContext) {
-    // This worker does not use scheduled events.
+pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    let db = match env.d1("DB") {
+        Ok(db) => db,
+        Err(e) => {
+            tracing::error!("Failed to get D1 database binding: {}", e);
+            return;
+        }
+    };
+
+    // Define the list of providers to run the cleanup task for.
+    // In a real-world scenario, this might come from a configuration or another DB table.
+    let providers_to_clean = vec!["google-ai-studio", "openai", "anthropic"];
+
+    for provider in providers_to_clean {
+        tracing::info!("Running scheduled cleanup for provider: {}", provider);
+        match d1_storage::delete_permanently_failed_keys(&db, provider).await {
+            Ok(deleted_count) => {
+                tracing::info!(
+                    "Successfully completed cleanup for provider: {}. Deleted {} keys.",
+                    provider,
+                    deleted_count
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to run cleanup for provider: {}. Error: {}",
+                    provider,
+                    e
+                );
+            }
+        }
+    }
 }

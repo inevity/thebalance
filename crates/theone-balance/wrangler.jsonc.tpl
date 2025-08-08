@@ -24,6 +24,9 @@
             "migrations_dir": "migrations"
         }
     ],
+    "triggers": {
+        "crons": ["0 0 * * *"]
+    },
 //    "queues": {
 //        "producers": [
 //            {

@@ -39,7 +39,8 @@ pub async fn test_keys(
 
     for key in keys_to_test {
         info!("Testing key: {} for provider {}", key.key, provider);
-        
+
+        //TODO hardcode remove
         let test_result = test_single_key(provider, &key.key, "gemini-2.5-pro").await;
 
         let result = match test_result {

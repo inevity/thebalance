@@ -2,21 +2,24 @@
 //! It is only compiled when the `raw_d1` feature is enabled.
 
 use crate::dbmodels::{Key as DbKey, ModelCooling};
-use toasty::Model;
+use crate::error_handling;
 use crate::hybrid::{get_schema, HybridExecutor};
+use crate::request as key_tester;
 use crate::state::strategy::{ApiKey, ApiKeyStatus};
+use futures_util::future::join_all;
 use js_sys::Date;
-use serde_json;
-use std::collections::{HashMap, HashSet};
-use toasty::stmt::{IntoInsert, IntoSelect};
-use worker::D1Database;
-use toasty::Error as ToastyError;
-use std::result::Result as StdResult;
-use thiserror::Error;
-use tracing::{info};
 use mini_moka::sync::Cache;
 use once_cell::sync::Lazy;
+use serde_json;
+use std::collections::{HashMap, HashSet};
+use std::result::Result as StdResult;
 use std::time::Duration;
+use thiserror::Error;
+use toasty::stmt::{IntoInsert, IntoSelect};
+use toasty::Error as ToastyError;
+use toasty::Model;
+use tracing::{debug, info, warn};
+use worker::{D1Database, Fetch, Headers, Method, Request, RequestInit};
 
 static API_KEY_CACHE: Lazy<Cache<String, Vec<ApiKey>>> = Lazy::new(|| {
     Cache::builder()
@@ -25,13 +28,8 @@ static API_KEY_CACHE: Lazy<Cache<String, Vec<ApiKey>>> = Lazy::new(|| {
 });
 
 // The new "Penalty Box" cache.
-static COOLDOWN_CACHE: Lazy<Cache<String, ()>> = Lazy::new(|| {
-    Cache::builder()
-        .max_capacity(10_000)
-        .build()
-});
-
-
+static COOLDOWN_CACHE: Lazy<Cache<String, ()>> =
+    Lazy::new(|| Cache::builder().max_capacity(10_000).build());
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -49,7 +47,6 @@ impl From<StorageError> for worker::Error {
         }
     }
 }
-
 
 use uuid::Uuid;
 
@@ -96,9 +93,9 @@ pub async fn list_keys(
     let executor = get_executor(db);
 
     // Build the base query using correct Toasty API
-    let mut base_query = DbKey::filter_by_provider(provider.to_string())
-        .filter_by_status(status.to_string());
-    
+    let mut base_query =
+        DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
+
     // Apply sorting
     match sort_by {
         "createdAt" => {
@@ -123,26 +120,31 @@ pub async fn list_keys(
             }
         }
     }
-    
+
     // Get total count - we need a separate query for this
-    let count_query = DbKey::filter_by_provider(provider.to_string())
-        .filter_by_status(status.to_string());
+    let count_query =
+        DbKey::filter_by_provider(provider.to_string()).filter_by_status(status.to_string());
     let all_results = executor.exec_query(count_query).await?;
     let total_count = all_results.len() as i32;
-    
+
     // Apply pagination with limit and offset
     let offset = (page - 1) * page_size;
-    let paginated_query = base_query
-        .limit(page_size as i64)
-        .offset(offset as i64);
-    
+    let paginated_query = base_query.limit(page_size as i64).offset(offset as i64);
+
     let paginated_results = executor.exec_query(paginated_query).await?;
-    let api_keys: Vec<ApiKey> = paginated_results.into_iter().map(db_key_to_api_key).collect();
+    let api_keys: Vec<ApiKey> = paginated_results
+        .into_iter()
+        .map(db_key_to_api_key)
+        .collect();
 
     Ok((api_keys, total_count))
 }
 
-pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdResult<(), StorageError> {
+pub async fn add_keys(
+    db: &D1Database,
+    provider: &str,
+    keys_str: &str,
+) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     // Parse and deduplicate the input keys first.
@@ -157,17 +159,17 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdRes
     }
 
     // Fetch existing keys for the provider to find which ones we actually need to add.
-    let existing_db_keys = executor.exec_query(
-        DbKey::filter_by_provider(provider.to_string())
-    ).await?;
-    
+    let existing_db_keys = executor
+        .exec_query(DbKey::filter_by_provider(provider.to_string()))
+        .await?;
+
     // Remove any keys that already exist in the database from our set of new keys.
     for existing_key in existing_db_keys {
         unique_new_keys.remove(&existing_key.key);
     }
 
     let now = (Date::now() / 1000.0) as i64;
-    
+
     // Insert only the truly new keys.
     for key in unique_new_keys {
         let id_str = Uuid::new_v4().to_string();
@@ -188,7 +190,7 @@ pub async fn add_keys(db: &D1Database, provider: &str, keys_str: &str) -> StdRes
             .consecutive_failures(0)
             .last_checked_at(0)
             .last_succeeded_at(0);
-        
+
         executor.exec_insert(insert.into_insert()).await?;
     }
 
@@ -205,15 +207,13 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> StdResult<(), Sto
     let executor = get_executor(db);
 
     // First, fetch the keys to be deleted so we can find out their providers.
-    let keys_to_delete = executor.exec_query(
-        DbKey::filter(DbKey::FIELDS.id.in_set(ids.clone()))
-    ).await?;
+    let keys_to_delete = executor
+        .exec_query(DbKey::filter(DbKey::FIELDS.id.in_set(ids.clone())))
+        .await?;
 
     // Collect all unique provider names from the keys being deleted.
-    let providers_to_invalidate: HashSet<String> = keys_to_delete
-        .into_iter()
-        .map(|k| k.provider)
-        .collect();
+    let providers_to_invalidate: HashSet<String> =
+        keys_to_delete.into_iter().map(|k| k.provider).collect();
 
     // Invalidate the cache for each affected provider.
     for provider in providers_to_invalidate {
@@ -222,7 +222,9 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> StdResult<(), Sto
 
     // Use filter with in_set for multiple IDs
     let delete_query = DbKey::filter(DbKey::FIELDS.id.in_set(ids));
-    executor.exec_delete(delete_query.into_select().delete()).await?;
+    executor
+        .exec_delete(delete_query.into_select().delete())
+        .await?;
 
     Ok(())
 }
@@ -230,8 +232,8 @@ pub async fn delete_keys(db: &D1Database, ids: Vec<String>) -> StdResult<(), Sto
 pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
-    let query = DbKey::filter_by_provider(provider.to_string())
-        .filter_by_status("blocked".to_string());
+    let query =
+        DbKey::filter_by_provider(provider.to_string()).filter_by_status("blocked".to_string());
 
     // Invalidate the cache for this provider since we are deleting keys.
     API_KEY_CACHE.invalidate(&provider.to_string());
@@ -239,11 +241,14 @@ pub async fn delete_all_blocked(db: &D1Database, provider: &str) -> StdResult<()
     Ok(())
 }
 
-pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> StdResult<Option<ApiKey>, StorageError> {
+pub async fn get_key_coolings(
+    db: &D1Database,
+    key_id: &str,
+) -> StdResult<Option<ApiKey>, StorageError> {
     let executor = get_executor(db);
 
     let query = DbKey::filter_by_id(key_id.to_string());
-    
+
     let key_result = executor.exec_first(query).await?;
 
     match key_result {
@@ -252,7 +257,10 @@ pub async fn get_key_coolings(db: &D1Database, key_id: &str) -> StdResult<Option
     }
 }
 
-pub async fn get_keys_by_ids(db: &D1Database, ids: Vec<String>) -> StdResult<Vec<ApiKey>, StorageError> {
+pub async fn get_keys_by_ids(
+    db: &D1Database,
+    ids: Vec<String>,
+) -> StdResult<Vec<ApiKey>, StorageError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -268,15 +276,19 @@ pub async fn get_keys_by_ids(db: &D1Database, ids: Vec<String>) -> StdResult<Vec
     Ok(api_keys)
 }
 
-
-pub async fn get_active_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
+pub async fn get_active_keys(
+    db: &D1Database,
+    provider: &str,
+) -> StdResult<Vec<ApiKey>, StorageError> {
     if provider.is_empty() {
-        return Err(StorageError::Worker(worker::Error::from("Provider not specified")));
+        return Err(StorageError::Worker(worker::Error::from(
+            "Provider not specified",
+        )));
     }
     let executor = get_executor(db);
 
-    let query = DbKey::filter_by_provider(provider.to_string())
-        .filter_by_status("active".to_string());
+    let query =
+        DbKey::filter_by_provider(provider.to_string()).filter_by_status("active".to_string());
 
     let db_keys = executor.exec_query(query).await?;
 
@@ -309,14 +321,25 @@ pub async fn get_healthy_sorted_keys_via_cache(
     } else {
         // Or fetch from D1 if the main cache is empty.
         let keys_from_db = get_healthy_sorted_keys(db, provider).await?;
-        info!(provider, "Cache miss for provider. Populating cache from D1 with {} keys.", keys_from_db.len());
+        info!(
+            provider,
+            "Cache miss for provider. Populating cache from D1 with {} keys.",
+            keys_from_db.len()
+        );
         API_KEY_CACHE.insert(provider.to_string(), keys_from_db.clone());
         keys_from_db
     };
 
-    info!(provider, "Total healthy keys from main cache/D1: {}", all_cached_keys.len());
+    info!(
+        provider,
+        "Total healthy keys from main cache/D1: {}",
+        all_cached_keys.len()
+    );
     let cooldown_count = COOLDOWN_CACHE.iter().count();
-    info!(provider, "Keys currently in cooldown cache: {}", cooldown_count);
+    info!(
+        provider,
+        "Keys currently in cooldown cache: {}", cooldown_count
+    );
 
     // Step 2: NEW - Filter the list in-memory against the cooldown cache.
     let currently_usable_keys: Vec<ApiKey> = all_cached_keys
@@ -331,25 +354,39 @@ pub async fn get_healthy_sorted_keys_via_cache(
         })
         .collect();
 
-    info!(provider, "Final count of usable failover keys: {}", currently_usable_keys.len());
+    info!(
+        provider,
+        "Final count of usable failover keys: {}",
+        currently_usable_keys.len()
+    );
 
     Ok(currently_usable_keys)
 }
 
 pub fn flag_key_with_cooldown(key_id: &str, duration_seconds: u64) {
-    info!(key_id, duration_seconds, "Flagging key for temporary cooldown in local cache.");
-    COOLDOWN_CACHE.insert_with_ttl(key_id.to_string(), (), Duration::from_secs(duration_seconds));
+    info!(
+        key_id,
+        duration_seconds, "Flagging key for temporary cooldown in local cache."
+    );
+    COOLDOWN_CACHE.insert_with_ttl(
+        key_id.to_string(),
+        (),
+        Duration::from_secs(duration_seconds),
+    );
 }
 
-
-
-
-pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> StdResult<(), StorageError> {
+pub async fn update_status(
+    db: &D1Database,
+    id: &str,
+    status: ApiKeyStatus,
+) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
     // Get the existing key
-    let existing = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
-    
+    let existing = executor
+        .exec_first(DbKey::filter_by_id(id.to_string()))
+        .await?;
+
     if let Some(key) = existing {
         // Invalidate the main cache since this key's permanent status has changed.
         API_KEY_CACHE.invalidate(&key.provider);
@@ -360,16 +397,16 @@ pub async fn update_status(db: &D1Database, id: &str, status: ApiKeyStatus) -> S
         } else {
             "blocked".to_string()
         };
-        
+
         let update_query = DbKey::filter_by_id(id.to_string())
             .update()
             .status(status_str)
             .updated_at((Date::now() / 1000.0) as i64);
-        
+
         // Now we can access the public stmt field and execute it
         executor.exec_update(update_query.stmt).await?;
     }
-    
+
     Ok(())
 }
 
@@ -381,7 +418,9 @@ pub async fn set_cooldown(
 ) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
 
-    let key_result = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
+    let key_result = executor
+        .exec_first(DbKey::filter_by_id(id.to_string()))
+        .await?;
 
     if let Some(key) = key_result {
         let mut coolings: HashMap<String, i64> =
@@ -396,7 +435,7 @@ pub async fn set_cooldown(
             .update()
             .model_coolings(new_coolings_json)
             .updated_at((Date::now() / 1000.0) as i64);
-        
+
         // Now we can access the public stmt field and execute it
         executor.exec_update(update_query.stmt).await?;
     }
@@ -414,13 +453,15 @@ pub async fn set_key_model_cooldown_if_available(
     let now = (Date::now() / 1000.0) as u64;
 
     // First, get the key to check if it exists and if the model is already cooling down
-    let key_result = executor.exec_first(DbKey::filter_by_id(id.to_string())).await?;
-    
+    let key_result = executor
+        .exec_first(DbKey::filter_by_id(id.to_string()))
+        .await?;
+
     if let Some(mut key) = key_result {
         // Parse the existing model coolings
-        let mut coolings: HashMap<String, ModelCooling> = 
+        let mut coolings: HashMap<String, ModelCooling> =
             key.get_model_coolings()?.unwrap_or_default();
-        
+
         // Check if this model is already cooling down
         if let Some(cooling) = coolings.get(model) {
             if cooling.end_at as u64 > now {
@@ -428,38 +469,45 @@ pub async fn set_key_model_cooldown_if_available(
                 return Ok(false);
             }
         }
-        
+
         // Update the cooling for this model
         let new_cooling = ModelCooling {
-            total_seconds: coolings.get(model).map(|c| c.total_seconds).unwrap_or(0) + duration_secs as i64,
+            total_seconds: coolings.get(model).map(|c| c.total_seconds).unwrap_or(0)
+                + duration_secs as i64,
             end_at: (now + duration_secs) as i64,
         };
         coolings.insert(model.to_string(), new_cooling);
-        
+
         // Update the key with new coolings
         key.set_model_coolings(&coolings)?;
-        
+
         // Calculate new total cooling seconds
         let new_total_cooling_seconds = key.total_cooling_seconds + duration_secs as i64;
-        
+
         // Update in database
         let update_query = DbKey::filter_by_id(id.to_string())
             .update()
             .model_coolings(key.model_coolings.clone())
             .total_cooling_seconds(new_total_cooling_seconds)
             .updated_at(now as i64);
-        
+
         executor.exec_update(update_query.stmt).await?;
 
-        
         Ok(true)
     } else {
         Ok(false)
     }
 }
-async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
+async fn get_healthy_sorted_keys(
+    db: &D1Database,
+    provider: &str,
+) -> StdResult<Vec<ApiKey>, StorageError> {
     let all_active_keys = get_active_keys(db, provider).await?;
-    info!(provider, "Initial DB query returned {} active keys before circuit breaker filter.", all_active_keys.len());
+    info!(
+        provider,
+        "Initial DB query returned {} active keys before circuit breaker filter.",
+        all_active_keys.len()
+    );
 
     let now = (Date::now() / 1000.0) as u64;
     const RECOVERY_PERIOD_SECONDS: u64 = 3600; // 1 hour
@@ -473,7 +521,7 @@ async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<V
                 // Key has failed 5+ times. Check if it's time for another chance.
                 let time_since_last_check = now.saturating_sub(key.last_checked_at);
                 if time_since_last_check > RECOVERY_PERIOD_SECONDS {
-                    info!(key_id = %key.id, "Key has been sidelined for over 1 hour. Adding to probationary pool.");
+                    debug!(key_id = %key.id, "Key has been sidelined for over 1 hour. Adding to probationary pool.");
                     true // Give it a chance.
                 } else {
                     false // Still in the penalty box.
@@ -485,20 +533,24 @@ async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<V
     if active_keys.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     // Define a helper closure to calculate score
     let calculate_health_score = |key: &ApiKey| -> i64 {
         // Lower latency is better, higher success rate is better.
-        let latency_score = 10000 - key.latency_ms; 
+        let latency_score = 10000 - key.latency_ms;
         // key.success_rate is a float between 0.0 and 1.0. Scale it for the score.
         let success_score = (key.success_rate * 1000.0) as i64;
-        
+
         // Penalize consecutive failures heavily.
         let failure_penalty = key.consecutive_failures * 50;
-        
+
         // Add a small bonus for recently successful keys to break ties.
-        let recent_success_bonus = if now.saturating_sub(key.last_succeeded_at) < 300 { 10 } else { 0 };
-        
+        let recent_success_bonus = if now.saturating_sub(key.last_succeeded_at) < 300 {
+            10
+        } else {
+            0
+        };
+
         latency_score + success_score - failure_penalty + recent_success_bonus
     };
 
@@ -519,13 +571,15 @@ pub async fn update_key_metrics(
     latency: i64,
 ) -> StdResult<(), StorageError> {
     let executor = get_executor(db);
-    let key_result = executor.exec_first(DbKey::filter_by_id(key_id.to_string())).await?;
+    let key_result = executor
+        .exec_first(DbKey::filter_by_id(key_id.to_string()))
+        .await?;
 
     if let Some(mut key) = key_result {
         let now = (Date::now() / 1000.0) as i64;
         let new_latency = latency;
         let new_last_checked_at = now;
-        
+
         let (new_consecutive_failures, new_success_rate, new_last_succeeded_at) = if is_success {
             // Recalculate success rate using a simple moving average.
             // We scale by 1000, so 1.0 is 1000.
@@ -546,34 +600,124 @@ pub async fn update_key_metrics(
             .last_checked_at(new_last_checked_at)
             .last_succeeded_at(new_last_succeeded_at)
             .updated_at(now);
-        
+
         executor.exec_update(update_query.stmt).await?;
-        
     }
 
     Ok(())
 }
 
-pub async fn delete_permanently_failed_keys(db: &D1Database, provider: &str) -> StdResult<usize, StorageError> {
+async fn is_key_permanently_invalid(key: &DbKey) -> bool {
+    // We can only test providers that have a native chat test implemented.
+    if key.provider != "google-ai-studio" {
+        // For other providers, we assume 'false' to be safe and avoid deleting valid keys.
+        return false;
+    }
+
+    // Use the key_tester to send a real, lightweight request to the native provider endpoint.
+    match key_tester::send_native_chat_test_request(&key.provider, &key.key, "gemini-2.5-pro").await
+    {
+        Ok(mut resp) => {
+            let status = resp.status_code();
+            if status == 200 {
+                // The key works, so it's definitely not invalid.
+                if let Ok(body_text) = resp.text().await {
+                     info!(key_id = %key.id, body_preview = %body_text.chars().take(100).collect::<String>(), "Key validation test passed. Key is valid.");
+                } else {
+                     info!(key_id = %key.id, "Key validation test passed. Key is valid. (Could not read response body for preview)");
+                }
+                false
+            } else {
+                // The request failed. We need to analyze the error to see if it's a permanent auth issue.
+                if let Ok(body_text) = resp.text().await {
+                    let analysis =
+                        error_handling::analyze_provider_error(&key.provider, status, &body_text)
+                            .await;
+                    if let error_handling::ErrorAnalysis::KeyIsInvalid = analysis {
+                        warn!(key_id = %key.id, status, body = %body_text, "Key validation test failed with a definitive 'Invalid Key' error.");
+                        true // The error analysis confirms the key is permanently invalid.
+                    } else {
+                        warn!(key_id = %key.id, status, body = %body_text, "Key validation test failed, but not with a definitive 'Invalid Key' error. It might be a temporary issue.");
+                        false // Any other error (rate limit, server error) is not a confirmation of permanent failure.
+                    }
+                } else {
+                    warn!(key_id = %key.id, status, "Key validation test failed, and we could not read the error body.");
+                    false // Could not read the body, cannot confirm.
+                }
+            }
+        }
+        Err(e) => {
+            warn!(key_id = %key.id, error = %e, "Key validation test request resulted in a network error.");
+            false
+        } // A network error doesn't mean the key is invalid.
+    }
+}
+
+pub async fn delete_permanently_failed_keys(
+    db: &D1Database,
+    provider: &str,
+) -> StdResult<usize, StorageError> {
     const PERMANENTLY_FAILED_THRESHOLD: i64 = 100; // Define a high failure count
     let executor = get_executor(db);
 
-    info!(provider, "Running cleanup task for permanently failed keys...");
+    info!(
+        provider,
+        "Running cleanup task for permanently failed keys..."
+    );
 
     let query = DbKey::filter_by_provider(provider.to_string())
         .filter_by_status("active".to_string())
-        .filter(DbKey::FIELDS.consecutive_failures.gt(PERMANENTLY_FAILED_THRESHOLD));
+        .filter(
+            DbKey::FIELDS
+                .consecutive_failures
+                .gt(PERMANENTLY_FAILED_THRESHOLD),
+        );
 
-    let keys_to_delete = executor.exec_query(query).await?;
-    let count = keys_to_delete.len();
+    let candidate_keys = executor.exec_query(query).await?;
+    let candidate_count = candidate_keys.len();
 
-    if count > 0 {
-        let ids_to_delete: Vec<String> = keys_to_delete.into_iter().map(|k| k.id.to_string()).collect();
-        info!(provider, "Found {} keys with over {} consecutive failures. Deleting them.", count, PERMANENTLY_FAILED_THRESHOLD);
-        delete_keys(db, ids_to_delete).await?;
-    } else {
-        info!(provider, "No permanently failed keys found to delete.");
+    if candidate_count == 0 {
+        info!(
+            provider,
+            "No candidate keys found to check for permanent failure."
+        );
+        return Ok(0);
     }
 
-    Ok(count)
+    info!(
+        provider,
+        "Found {} candidate keys with high failure counts. Performing live validation...",
+        candidate_count
+    );
+
+    // Concurrently validate all candidate keys.
+    let validation_futures = candidate_keys
+        .iter()
+        .map(|key| is_key_permanently_invalid(key));
+    let validation_results = join_all(validation_futures).await;
+
+    // Collect the IDs of the keys that are confirmed to be invalid.
+    let mut ids_to_delete: Vec<String> = Vec::new();
+    for (i, is_invalid) in validation_results.into_iter().enumerate() {
+        if is_invalid {
+            ids_to_delete.push(candidate_keys[i].id.to_string());
+        }
+    }
+
+    let final_delete_count = ids_to_delete.len();
+    if final_delete_count > 0 {
+        info!(
+            provider,
+            "Found {} keys that are confirmed permanently invalid. Deleting them.",
+            final_delete_count
+        );
+        delete_keys(db, ids_to_delete).await?;
+    } else {
+        info!(
+            provider,
+            "No permanently failed keys were confirmed for deletion after live validation."
+        );
+    }
+
+    Ok(final_delete_count)
 }
