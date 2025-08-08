@@ -1,6 +1,7 @@
 //! Utility functions for request handling, parsing, and data manipulation.
 
 use rand::seq::SliceRandom;
+use tracing::warn;
 use worker::{Env, Request, Result};
 
 /// Extracts the API key from the Authorization header of an axum request.
@@ -31,7 +32,18 @@ pub fn is_valid_auth_key(key: &str, env: &Env) -> bool {
         return false;
     }
     match env.var("AUTH_KEY") {
-        Ok(master_key) => key == master_key.to_string(),
+        Ok(master_key) => {
+            let master_key_str = master_key.to_string();
+            let is_match = key == master_key_str;
+            if !is_match {
+                warn!(
+                    "Auth Check Failed: Provided key='{}' does not match Master key='{}'",
+                    partially_redact_key(key),
+                    partially_redact_key(&master_key_str)
+                );
+            }
+            is_match
+        }
         Err(_) => false, // If AUTH_KEY is not set, all keys are invalid.
     }
 }
