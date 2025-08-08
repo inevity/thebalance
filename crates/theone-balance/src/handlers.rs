@@ -691,3 +691,63 @@ pub async fn forward(
 }
 
 
+// --- ADD THIS NEW HANDLER ---
+#[instrument(skip_all, level = "warn", fields(request_id = %uuid::Uuid::new_v4()))]
+#[worker::send]
+pub async fn run_cleanup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let result: Result<axum::response::Response> = async {
+        let env = &state.env;
+        info!("Manual cleanup trigger for provider: {}", provider);
+
+        // --- 1. Authenticate ---
+        let main_auth_key = util::get_auth_key_from_axum_header(&req)?;
+        if !util::is_valid_auth_key(&main_auth_key, env) {
+            return Ok(create_openai_error_response(
+                "Invalid authentication credentials.",
+                "invalid_request_error",
+                "invalid_api_key",
+                401,
+            )
+            .into_response());
+        }
+
+        // --- 2. Run Cleanup ---
+        let db = env.d1("DB")?;
+        match d1_storage::delete_permanently_failed_keys(&db, &provider).await {
+            Ok(deleted_count) => {
+                let success_message = format!(
+                    "Successfully completed cleanup for provider: {}. Deleted {} keys.",
+                    provider, deleted_count
+                );
+                info!("{}", &success_message);
+                Ok(axum::response::Response::builder()
+                    .status(200)
+                    .body(axum::body::Body::from(success_message))
+                    .unwrap())
+            }
+            Err(e) => {
+                let error_message = format!(
+                    "Failed to run cleanup for provider: {}. Error: {}",
+                    provider, e
+                );
+                error!("{}", &error_message);
+                Ok(axum::response::Response::builder()
+                    .status(500)
+                    .body(axum::body::Body::from(error_message))
+                    .unwrap())
+            }
+        }
+    }
+    .await;
+
+    match result {
+        Ok(resp) => resp.into_response(),
+        Err(e) => AxumWorkerError(e).into_response(),
+    }
+}
+
+
