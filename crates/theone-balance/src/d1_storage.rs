@@ -622,9 +622,9 @@ async fn is_key_permanently_invalid(key: &DbKey) -> bool {
             if status == 200 {
                 // The key works, so it's definitely not invalid.
                 if let Ok(body_text) = resp.text().await {
-                     info!(key_id = %key.id, body_preview = %body_text.chars().take(100).collect::<String>(), "Key validation test passed. Key is valid.");
+                    info!(key_id = %key.id, body_preview = %body_text.chars().take(100).collect::<String>(), "Key validation test passed. Key is valid.");
                 } else {
-                     info!(key_id = %key.id, "Key validation test passed. Key is valid. (Could not read response body for preview)");
+                    info!(key_id = %key.id, "Key validation test passed. Key is valid. (Could not read response body for preview)");
                 }
                 false
             } else {
