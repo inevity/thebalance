@@ -314,6 +314,10 @@ pub async fn get_healthy_sorted_keys_via_cache(
         keys_from_db
     };
 
+    info!(provider, "Total healthy keys from main cache/D1: {}", all_cached_keys.len());
+    let cooldown_count = COOLDOWN_CACHE.iter().count();
+    info!(provider, "Keys currently in cooldown cache: {}", cooldown_count);
+
     // Step 2: NEW - Filter the list in-memory against the cooldown cache.
     let currently_usable_keys: Vec<ApiKey> = all_cached_keys
         .into_iter()
@@ -326,6 +330,8 @@ pub async fn get_healthy_sorted_keys_via_cache(
             !is_on_cooldown
         })
         .collect();
+
+    info!(provider, "Final count of usable failover keys: {}", currently_usable_keys.len());
 
     Ok(currently_usable_keys)
 }
@@ -452,7 +458,10 @@ pub async fn set_key_model_cooldown_if_available(
     }
 }
 async fn get_healthy_sorted_keys(db: &D1Database, provider: &str) -> StdResult<Vec<ApiKey>, StorageError> {
-    let mut active_keys: Vec<ApiKey> = get_active_keys(db, provider).await?
+    let all_active_keys = get_active_keys(db, provider).await?;
+    info!(provider, "Initial DB query returned {} active keys before circuit breaker filter.", all_active_keys.len());
+
+    let mut active_keys: Vec<ApiKey> = all_active_keys
         .into_iter()
         .filter(|key| key.consecutive_failures < 5) // Circuit breaker
         .collect();
