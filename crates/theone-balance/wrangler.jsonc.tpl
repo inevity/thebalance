@@ -56,6 +56,7 @@
        // "TARGET_TIMEOUT_MS": "40000"
         "TARGET_TIMEOUT_MS": "10000"
        // default 10
+        "RECOVERY_THRESHOLD": "5"
     },
     "observability": {
       "enabled": true,
