@@ -633,7 +633,13 @@ async fn is_key_permanently_invalid(db: &D1Database, key: &DbKey) -> bool {
                 } else {
                     info!(key_id = %key.id, "Key validation test passed. Key is valid. (Could not read response body for preview)");
                 }
-                false
+
+                // --- NEW: Reset the key's failure count since it passed validation ---
+                if let Err(e) = update_key_metrics(db, &key.id.to_string(), true, 0).await {
+                    warn!(key_id = %key.id, error = %e, "Failed to reset metrics for validated key.");
+                }
+                
+                false // Return false because the key is not invalid.
             } else {
                 // The request failed. We need to analyze the error to see if it's a permanent auth issue.
                 if let Ok(body_text) = resp.text().await {
