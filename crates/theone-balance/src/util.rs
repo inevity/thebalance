@@ -31,7 +31,7 @@ pub fn is_valid_auth_key(key: &str, env: &Env) -> bool {
     if key.is_empty() {
         return false;
     }
-    match env.var("AUTH_KEY") {
+    match env.secret("AUTH_KEY") {
         Ok(master_key) => {
             let master_key_str = master_key.to_string();
             let is_match = key == master_key_str;

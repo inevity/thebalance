@@ -261,7 +261,7 @@ async fn make_gateway_request(
     new_headers.set("X-OneBalance-Request-ID", request_id)?;
 
     // Add the AI Gateway token if it's configured.
-    if let Ok(token) = env.var("AI_GATEWAY_TOKEN") {
+    if let Ok(token) = env.secret("AI_GATEWAY_TOKEN") {
         new_headers.set(
             "cf-aig-authorization",
             &format!("Bearer {}", token.to_string()),
@@ -271,7 +271,7 @@ async fn make_gateway_request(
     // Construct the AI Gateway URL.
     // In Rust, we cannot use the `env.AI.gateway()` binding as it doesn't exist.
     // We must manually construct the URL from environment variables.
-    let account_id = env.var("CLOUDFLARE_ACCOUNT_ID")?.to_string();
+    let account_id = env.secret("CLOUDFLARE_ACCOUNT_ID")?.to_string();
     let gateway_name = env.var("AI_GATEWAY")?.to_string();
     let base = format!(
         "https://gateway.ai.cloudflare.com/v1/{}/{}",

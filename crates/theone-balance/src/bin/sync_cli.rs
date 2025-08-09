@@ -10,6 +10,7 @@ use cli::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     init_tracing();
     let cli = Cli::parse();
     let result = match cli.command {

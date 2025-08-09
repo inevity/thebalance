@@ -41,12 +41,8 @@
 //        ]
 //    },
     "vars": {
-        "AUTH_KEY": "my-auth-key",
         //AI bind: Ai gateway name 
         "AI_GATEWAY": "aigateway-name",
-        "CLOUDFLARE_API_TOKEN": "xxxxx",
-        "CLOUDFLARE_ACCOUNT_ID": "xxxx",
-        "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false",
         // "RUST_LOG": "warn,one_balance_rust::handlers=info"
         "RUST_LOG": "info",

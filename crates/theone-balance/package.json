@@ -9,17 +9,20 @@
     "db:find": "find .wrangler/state/v3/d1 -name '*.sqlite' | head -1",
     "dev": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087",
     "dev-queue": "pnpm init:config && pnpm pre-dev && pnpm migrate && wrangler dev --local --no-bundle --port 8087 -- -v --no-default-features --features 'raw_d1,axumrouter,use_queue,tracing-worker'",
-    "migrate": "drizzle-kit generate && wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --local",
-    "migrate:remote": "drizzle-kit generate && wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote",
-    "deploy": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy -- --features 'raw_d1,axumrouter,wait_until,tracing-worker'",
-    "deploy:queue": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy -- --no-default-features --features 'raw_d1,axumrouter,use_queue,tracing-worker'",
-    "deploy:dry-run": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && wrangler deploy --dry-run",
-    "deploy:reset": "pnpm deploy && wrangler d1 execute $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote --command \"UPDATE keys SET status = 'active',model_coolings = '{}', total_cooling_seconds = 0;\""
+    "migrate": "drizzle-kit generate && dotenv -- wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --local",
+    "migrate:remote": "drizzle-kit generate && dotenv -- wrangler d1 migrations apply $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote",
+    "deploy": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && dotenv -- wrangler deploy -- --features 'raw_d1,axumrouter,wait_until,tracing-worker'",
+    "deploy:queue": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && dotenv -- wrangler deploy -- --no-default-features --features 'raw_d1,axumrouter,use_queue,tracing-worker'",
+    "deploy:dry-run": "pnpm init:config && pnpm pre-deploy && pnpm migrate:remote && dotenv -- wrangler deploy --dry-run",
+    "deploy:reset": "pnpm deploy && dotenv -- wrangler d1 execute $(node -p 'require(\"jsonc-parser\").parse(require(\"fs\").readFileSync(\"./wrangler.jsonc\", \"utf8\")).d1_databases[0].database_name') --remote --command \"UPDATE keys SET status = 'active',model_coolings = '{}', total_cooling_seconds = 0;\"",
+    "secrets:push": "dotenv -- node secrets-push.mjs"
+
   },
   "devDependencies": {
     "wrangler": "4.26.1",
     "drizzle-kit": "^0.31.2",
-    "jsonc-parser": "^3.2.0"
+    "jsonc-parser": "^3.2.0",
+    "dotenv-cli": "^7.4.2"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.2"

@@ -59,33 +59,12 @@ async function main() {
         process.exit(1)
     }
 
-    const authKey = process.env.AUTH_KEY
-    const aiGatewayToken = process.env.AI_GATEWAY_TOKEN
-    const oauthtoken = process.env.CLOUDFLARE_API_TOKEN
     const aigatewayname = process.env.AI_GATEWAY
-    const accountid = process.env.CLOUDFLARE_ACCOUNT_ID
     const config = getWranglerConfig()
 
-    if (authKey) {
-        console.log(`Setting AUTH_KEY to '${authKey}'...`)
-        config.vars.AUTH_KEY = authKey
-    }
-
-    if (aiGatewayToken) {
-        console.log(`Setting AI_GATEWAY_TOKEN to '${aiGatewayToken}'...`)
-        config.vars.AI_GATEWAY_TOKEN = aiGatewayToken
-    }
-    if (oauthtoken) {
-        console.log(`Setting CLOUDFLARE_API_TOKEN  to '${oauthtoken}'...`)
-        config.vars.CLOUDFLARE_API_TOKEN = oauthtoken
-    }
     if (aigatewayname) {
         console.log(`Setting AI_GATEWAY name  to '${aigatewayname}'...`)
         config.vars.AI_GATEWAY = aigatewayname
-    }
-    if (accountid) {
-        console.log(`Setting CLOUDFLARE_ACCOUNT_ID   to '${accountid}'...`)
-        config.vars.CLOUDFLARE_ACCOUNT_ID = accountid
     }
     config.vars.IS_LOCAL = "false"
 
