@@ -200,7 +200,7 @@ pub async fn get_active_keys(provider: &str, env: &Env) -> Result<Vec<ApiKey>> {
     #[cfg(feature = "raw_d1")]
     {
         let db = env.d1("DB")?;
-        Ok(crate::d1_storage::get_healthy_sorted_keys_via_cache(&db, provider).await.map_err(|e| worker::Error::from(e))?)
+        Ok(crate::d1_storage::get_healthy_sorted_keys_via_cache(env, &db, provider).await.map_err(|e| worker::Error::from(e))?)
     }
     #[cfg(not(feature = "raw_d1"))]
     {
@@ -341,6 +341,7 @@ pub async fn forward(
 
         // --- 2. Get and Sort Active Keys by Health ---
         let sorted_keys = match d1_storage::get_healthy_sorted_keys_via_cache(
+            env,
             &env.d1("DB")?,
             &provider,
         )
@@ -717,7 +718,7 @@ pub async fn run_cleanup_handler(
 
         // --- 2. Run Cleanup ---
         let db = env.d1("DB")?;
-        match d1_storage::delete_permanently_failed_keys(&db, &provider).await {
+        match d1_storage::delete_permanently_failed_keys(env, &db, &provider).await {
             Ok(deleted_count) => {
                 let success_message = format!(
                     "Successfully completed cleanup for provider: {}. Deleted {} keys.",

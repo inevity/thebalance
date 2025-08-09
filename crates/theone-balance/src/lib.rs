@@ -154,7 +154,7 @@ pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) 
 
     for provider in providers_to_clean {
         tracing::info!("Running scheduled cleanup for provider: {}", provider);
-        match d1_storage::delete_permanently_failed_keys(&db, provider).await {
+        match d1_storage::delete_permanently_failed_keys(&env, &db, provider).await {
             Ok(deleted_count) => {
                 tracing::info!(
                     "Successfully completed cleanup for provider: {}. Deleted {} keys.",

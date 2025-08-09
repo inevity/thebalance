@@ -19,7 +19,7 @@ use toasty::stmt::{IntoInsert, IntoSelect};
 use toasty::Error as ToastyError;
 use toasty::Model;
 use tracing::{debug, info, warn};
-use worker::{D1Database, Fetch, Headers, Method, Request, RequestInit};
+use worker::{D1Database, Env, Fetch, Headers, Method, Request, RequestInit};
 
 static API_KEY_CACHE: Lazy<Cache<String, Vec<ApiKey>>> = Lazy::new(|| {
     Cache::builder()
@@ -312,6 +312,7 @@ pub async fn get_active_keys(
 }
 
 pub async fn get_healthy_sorted_keys_via_cache(
+    env: &Env,
     db: &D1Database,
     provider: &str,
 ) -> StdResult<Vec<ApiKey>, StorageError> {
@@ -320,7 +321,7 @@ pub async fn get_healthy_sorted_keys_via_cache(
         keys
     } else {
         // Or fetch from D1 if the main cache is empty.
-        let keys_from_db = get_healthy_sorted_keys(db, provider).await?;
+        let keys_from_db = get_healthy_sorted_keys(env, db, provider).await?;
         info!(
             provider,
             "Cache miss for provider. Populating cache from D1 with {} keys.",
@@ -499,6 +500,7 @@ pub async fn set_key_model_cooldown_if_available(
     }
 }
 async fn get_healthy_sorted_keys(
+    env: &Env,
     db: &D1Database,
     provider: &str,
 ) -> StdResult<Vec<ApiKey>, StorageError> {
@@ -512,10 +514,15 @@ async fn get_healthy_sorted_keys(
     let now = (Date::now() / 1000.0) as u64;
     const RECOVERY_PERIOD_SECONDS: u64 = 3600; // 1 hour
 
+    let recovery_threshold = env
+        .var("RECOVERY_THRESHOLD")
+        .map(|v| v.to_string().parse().unwrap_or(5))
+        .unwrap_or(5);
+
     let mut active_keys: Vec<ApiKey> = all_active_keys
         .into_iter()
         .filter(|key| {
-            if key.consecutive_failures < 5 {
+            if key.consecutive_failures < recovery_threshold {
                 true // Key is healthy, include it.
             } else {
                 // Key has failed 5+ times. Check if it's time for another chance.
@@ -607,7 +614,7 @@ pub async fn update_key_metrics(
     Ok(())
 }
 
-async fn is_key_permanently_invalid(key: &DbKey) -> bool {
+async fn is_key_permanently_invalid(db: &D1Database, key: &DbKey) -> bool {
     // We can only test providers that have a native chat test implemented.
     if key.provider != "google-ai-studio" {
         // For other providers, we assume 'false' to be safe and avoid deleting valid keys.
@@ -654,10 +661,18 @@ async fn is_key_permanently_invalid(key: &DbKey) -> bool {
 }
 
 pub async fn delete_permanently_failed_keys(
+    env: &Env,
     db: &D1Database,
     provider: &str,
 ) -> StdResult<usize, StorageError> {
-    const PERMANENTLY_FAILED_THRESHOLD: i64 = 100; // Define a high failure count
+    let recovery_threshold = env
+        .var("RECOVERY_THRESHOLD")
+        .map(|v| v.to_string().parse().unwrap_or(5))
+        .unwrap_or(5);
+
+    // A key is considered permanently failed if its failure count is a large multiple of the recovery threshold.
+    let permanently_failed_threshold: i64 = recovery_threshold * 10;
+
     let executor = get_executor(db);
 
     info!(
@@ -670,7 +685,7 @@ pub async fn delete_permanently_failed_keys(
         .filter(
             DbKey::FIELDS
                 .consecutive_failures
-                .gt(PERMANENTLY_FAILED_THRESHOLD),
+                .gt(permanently_failed_threshold),
         );
 
     let candidate_keys = executor.exec_query(query).await?;
@@ -693,7 +708,7 @@ pub async fn delete_permanently_failed_keys(
     // Concurrently validate all candidate keys.
     let validation_futures = candidate_keys
         .iter()
-        .map(|key| is_key_permanently_invalid(key));
+        .map(|key| is_key_permanently_invalid(db, key));
     let validation_results = join_all(validation_futures).await;
 
     // Collect the IDs of the keys that are confirmed to be invalid.
