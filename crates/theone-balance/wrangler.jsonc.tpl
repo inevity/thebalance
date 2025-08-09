@@ -49,12 +49,13 @@
         "AI_GATEWAY_TOKEN": "xxxx",
         "IS_LOCAL": "false",
         // "RUST_LOG": "warn,one_balance_rust::handlers=info"
-        "RUST_LOG": "warn",
+        "RUST_LOG": "info",
         // "OVERALL_TIMEOUT_MS": "240000", 
-        "OVERALL_TIMEOUT_MS": "40000", 
+        //"OVERALL_TIMEOUT_MS": "40000", 
+        "OVERALL_TIMEOUT_MS": "80000", 
        // default 25
        // "TARGET_TIMEOUT_MS": "40000"
-        "TARGET_TIMEOUT_MS": "10000"
+        "TARGET_TIMEOUT_MS": "10000",
        // default 10
         "RECOVERY_THRESHOLD": "5"
     },

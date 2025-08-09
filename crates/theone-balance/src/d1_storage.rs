@@ -732,7 +732,7 @@ pub async fn delete_permanently_failed_keys(
             "Found {} keys that are confirmed permanently invalid. Deleting them.",
             final_delete_count
         );
-        delete_keys(db, ids_to_delete).await?;
+        // delete_keys(db, ids_to_delete).await?;
     } else {
         info!(
             provider,
