@@ -1,8 +1,32 @@
-target
-node_modules
-.wrangler
-pnpm-lock.yaml
+# Rust
+target/
 Cargo.lock
+
+# Node
+node_modules/
+pnpm-lock.yaml
+
+# Wrangler
+.wrangler/
 wrangler.jsonc
-migrations
+
+# Drizzle
+migrations/
+
+# Secrets
+.env*
+!.env.example
+
+# Build artifacts
+build/
+pkg/
+
+# OS / IDE
+.DS_Store
+*.swo
+*.swp
+*.swn
+.vscode/
+.idea/
+
 
