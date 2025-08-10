@@ -1,0 +1,28 @@
+[package]
+name = "tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["toasty/sqlite"]
+mysql = ["toasty/mysql"]
+dynamodb = ["toasty/dynamodb"]
+postgresql = ["toasty/postgresql"]
+
+[dependencies]
+async-trait.workspace = true
+toasty.workspace = true
+toasty-core.workspace = true
+toasty-macros.workspace = true
+
+# Utilities
+std-util.workspace = true
+trybuild.workspace = true
+env_logger = "0.11.8"
+
+[dev-dependencies]
+
+# Tokio
+tokio.workspace = true

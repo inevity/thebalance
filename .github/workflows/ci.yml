@@ -1,0 +1,164 @@
+name: Cargo Build & Test
+
+on:
+    push:
+        branches:
+        - main
+    pull_request:
+
+env:
+    CARGO_TERM_COLOR: always
+    RUSTFLAGS: -D warnings
+    RUST_BACKTRACE: 1
+    TOASTY_TEST_POSTGRES_URL: "postgresql://toasty:toasty@localhost/toasty"
+    TOASTY_TEST_MYSQL_URL: "mysql://toasty:toasty@localhost/toasty"
+    AWS_REGION: "foo"
+    AWS_ENDPOINT_URL: http://localhost:8000
+
+jobs:
+    check:
+        name: cargo check
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+          with:
+            components: rustfmt
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo check
+          run: cargo check --workspace --all-features
+        - name: cargo fmt
+          run: cargo fmt --all --check
+
+    clippy:
+        name: cargo clippy
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+          with:
+            components: clippy
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo clippy
+          run: cargo clippy --workspace --all-features
+
+    test-sqlite:
+      needs: check
+      name: Run tests for Sqlite
+      runs-on: ubuntu-latest
+      steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo test
+        run: cargo test --workspace --no-default-features --features sqlite
+
+    test-mysql:
+        needs: check
+        name: Run tests for MySQL
+        runs-on: ubuntu-latest
+        services:
+          mysql:
+            image: mysql:9
+            env:
+              MYSQL_ROOT_PASSWORD: toasty
+              MYSQL_USER: toasty
+              MYSQL_PASSWORD: toasty
+              MYSQL_DATABASE: toasty
+            ports:
+              - 3306:3306
+            options: --health-cmd "mysqladmin ping -h localhost" --health-interval 10s --health-timeout 5s --health-retries 5
+        env:
+            TOASTY_CONNECTION_URL: mysql://toasty:toasty@localhost:3306/toasty
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo test
+          run: cargo test --workspace --no-default-features --features mysql
+        - name: cargo run --bin example-hello-toasty
+          run: cargo run --bin example-hello-toasty --features mysql
+
+    test-postgresql:
+        needs: check
+        name: Run tests for PostgreSQL
+        runs-on: ubuntu-latest
+        services:
+          postgresql:
+            image: postgres:17
+            env:
+              POSTGRES_USER: toasty
+              POSTGRES_PASSWORD: toasty
+              POSTGRES_DB: toasty
+            ports:
+              - 5432:5432
+            options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        env:
+            TOASTY_CONNECTION_URL: postgresql://toasty:toasty@localhost/toasty
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo test
+          run: cargo test --workspace --no-default-features --features postgresql
+        - name: cargo run --bin example-hello-toasty
+          run: cargo run --bin example-hello-toasty --features postgresql
+
+    test-dynamodb:
+        needs: check
+        name: Run tests for DynamoDB
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: Start dynamodb-local
+          run: sudo docker run --name dynamodb -d -p 8000:8000 amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -port 8000
+        - name: cargo test
+          run: cargo test --workspace --no-default-features --features dynamodb
+
+    test-all-os:
+        needs: check
+        name: Run tests on all operating systems
+        runs-on: ${{ matrix.os }}
+        strategy:
+          matrix:
+            os:
+              - windows-latest
+              - ubuntu-latest
+              - macos-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo test
+          run: cargo test --workspace
+        - name: Run examples
+          run: scripts/gen-examples run
+
+    examples:
+        needs: check
+        name: Build the `hello-toasty` example with each feature
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - run: cargo install cargo-hack
+        - run: cd examples/hello-toasty && cargo hack build --each-feature
