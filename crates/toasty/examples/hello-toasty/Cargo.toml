@@ -1,0 +1,16 @@
+[package]
+name = "example-hello-toasty"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = [ "sqlite" ]
+dynamodb = [ "toasty/dynamodb" ]
+mysql = [ "toasty/mysql" ]
+postgresql = [ "toasty/postgresql" ]
+sqlite = [ "toasty/sqlite" ]
+
+[dependencies]
+toasty.workspace = true
+tokio.workspace = true
