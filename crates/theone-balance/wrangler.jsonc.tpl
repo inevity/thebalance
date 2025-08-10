@@ -42,8 +42,10 @@
 //    },
     "vars": {
         //AI bind: Ai gateway name 
-        "AI_GATEWAY": "aigateway-name",
+        //set here or use AI_GATEWAY=xx pnpm run deploy etc to override. 
+        "AI_GATEWAY": "test",
         "IS_LOCAL": "false",
+
         // "RUST_LOG": "warn,one_balance_rust::handlers=info"
         "RUST_LOG": "info",
         // "OVERALL_TIMEOUT_MS": "240000", 
