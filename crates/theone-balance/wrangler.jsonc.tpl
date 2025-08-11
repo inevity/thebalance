@@ -47,7 +47,7 @@
         "IS_LOCAL": "false",
 
         // "RUST_LOG": "warn,one_balance_rust::handlers=info"
-        "RUST_LOG": "info",
+        "RUST_LOG": "warn",
         // "OVERALL_TIMEOUT_MS": "240000", 
         //"OVERALL_TIMEOUT_MS": "40000", 
         "OVERALL_TIMEOUT_MS": "80000", 
