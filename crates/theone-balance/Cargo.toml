@@ -1,6 +1,6 @@
 [package]
 name = "one-balance-rust"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "An intelligent API gateway for routing requests to Cloudflare AI Gateway or native AI providers, built with Rust and running on Cloudflare Workers."
 authors = ["[inevity@approachai.com]"]

@@ -1,6 +1,6 @@
 {
-  "name": "one-balance-rust",
-  "version": "0.1.0",
+  "name": "thebalance",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "init:config": "node -e \"require('fs').copyFileSync('wrangler.jsonc.tpl', 'wrangler.jsonc')\"",
