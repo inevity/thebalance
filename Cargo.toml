@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/theone-balance",
+]
+exclude = [
+"crates/toasty/crates/toasty", 
+"crates/toasty/crates/toasty-core",    # Add this
+"crates/toasty/crates/toasty-sql",     # Add this
+]
