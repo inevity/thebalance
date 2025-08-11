@@ -80,77 +80,13 @@ Before you begin, ensure you have the following installed:
 *   [Rust](https://www.rust-lang.org/tools/install) (latest stable version)
 *   [Node.js](https://nodejs.org/en/) (v18 or later)
 *   [pnpm](https://pnpm.io/installation)
-*   [Cloudflare Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
 
 ## Getting Started
-
-1.  **Clone the Repository:**
-    ```bash
-    git clone https://github.com/your-username/theone.git
-    cd theone
-    ```
-
-2.  **Navigate to the Worker Directory:**
-    All configuration and scripts are run from within the `theone-balance` crate.
-    ```bash
-    cd crates/theone-balance
-    ```
-
-3.  **Install Dependencies and Configure Environment:**
-    First, install the Node.js tooling dependencies.
-    ```bash
-    pnpm install
-    ```
-    Next, create your environment file from the template and fill in your secrets.
-    ```bash
-    cp .env.example .env
-    ```
-
-4.  **Run the Development Server:**
-    This command compiles the Rust worker and starts a local server for testing.
-    ```bash
-    pnpm dev
-    ```
-
-## Build and Deployment
-
-
-
-This workspace uses a two-level system for managing builds and deployments, which provides both a simple top-level interface
-  and a clear separation of concerns.
-
- 1. The Workspace Orchestrator (justfile)
-
- The primary way to interact with the project is through the justfile located in the root of the workspace. It acts as a
- convenient command runner that delegates tasks to the appropriate crate.
-
- First, ensure you have just installed:
- cargo install just
-
- You can list all available commands by running just -l. The primary commands are:
-
- - just dev: Starts the local development server for the Cloudflare Worker.
- - just deploy: Deploys the worker to your Cloudflare account.
- - just migrate: Runs database migrations against your local development database.
- - just migrate-remote: Runs database migrations against your production Cloudflare D1 database.
- - just secrets-push: Securely pushes secrets from your .env file to your Cloudflare worker's environment.
- - just build-cli: Compiles the sync-cli utility binary.
- - just sync: Runs the sync-cli to synchronize data between instances (builds the CLI first).
-
- 2. The Core Worker Logic (crates/theone-balance)
-
- The actual build, deployment, and configuration logic for the Cloudflare Worker resides within the crates/theone-balance
- directory. This is where wrangler, pnpm, and drizzle-kit are configured. The root justfile simply calls the pnpm scripts
- defined here.
- This project uses `pnpm` to orchestrate `wrangler` and `drizzle-kit` for managing the Cloudflare Worker environment. All commands should be run from within the `crates/theone-balance` directory.
-
-*   **`pnpm dev`**: Starts the local development server for the Cloudflare Worker. It uses `wrangler` to build the Rust `cdylib` and serve it locally.
-*   **`pnpm migrate`**: Runs database migrations using `drizzle-kit`. This is used to keep the D1 database schema up to date.
-*   **`pnpm deploy`**: Deploys the Cloudflare Worker to the Cloudflare network. This script builds the Rust `cdylib` in release mode, bundles it with Wrangler, and pushes it to your Cloudflare account.
-
 Initial Setup
 
 Before you can use the project, a one-time setup is required. All commands should be run from the workspace root.
+First, ensure you have just installed:
+cargo install just
 
 1. Create Your Environment File:
 First, you need to create the .env file for the worker.
@@ -173,8 +109,38 @@ just install-all
 After completing these two steps, the entire workspace is set up. You can now use all the other just commands (like just
 dev, just sync, etc.) from the root directory for all subsequent operations.
 
+    ```
+
+## Build and Deployment
+This workspace uses a two-level system for managing builds and deployments, which provides both a simple top-level interface
+  and a clear separation of concerns.
+
+ 1. The Workspace Orchestrator (justfile)
+
+ The primary way to interact with the project is through the justfile located in the root of the workspace. It acts as a
+ convenient command runner that delegates tasks to the appropriate crate.
 
 
+ You can list all available commands by running just -l. The primary commands are:
+
+ - just dev: Starts the local development server for the Cloudflare Worker.
+ - just deploy: Deploys the worker to your Cloudflare account.
+ - just migrate: Runs database migrations against your local development database.
+ - just migrate-remote: Runs database migrations against your production Cloudflare D1 database.
+ - just secrets-push: Securely pushes secrets from your .env file to your Cloudflare worker's environment.
+ - just build-cli: Compiles the sync-cli utility binary.
+ - just sync: Runs the sync-cli to synchronize data between instances (builds the CLI first).
+
+ 2. The Core Worker Logic (crates/theone-balance)
+
+ The actual build, deployment, and configuration logic for the Cloudflare Worker resides within the crates/theone-balance
+ directory. This is where wrangler, pnpm, and drizzle-kit are configured. The root justfile simply calls the pnpm scripts
+ defined here.
+ This project uses `pnpm` to orchestrate `wrangler` and `drizzle-kit` for managing the Cloudflare Worker environment. All commands should be run from within the `crates/theone-balance` directory.
+
+*   **`pnpm dev`**: Starts the local development server for the Cloudflare Worker. It uses `wrangler` to build the Rust `cdylib` and serve it locally.
+*   **`pnpm migrate`**: Runs database migrations using `drizzle-kit`. This is used to keep the D1 database schema up to date.
+*   **`pnpm deploy`**: Deploys the Cloudflare Worker to the Cloudflare network. This script builds the Rust `cdylib` in release mode, bundles it with Wrangler, and pushes it to your Cloudflare account.
 
 ## Feature Flags
 
@@ -213,6 +179,7 @@ Current Testing Strategy
 
  local server test: 
  ```bash 
+ # OpenAI-Compatible chat
  curl http://localhost:8087/api/compat/chat/completions \                            14:59:05
   -H "Content-Type: application/json"   -H "cf-aig-authorization: Bearer local-cf-api-token" \
   -H "Authorization: Bearer local-auth-key" \
@@ -225,27 +192,51 @@ Current Testing Strategy
       }
     ]
   }'
-  curl -X POST -H "Authorization: Bearer local-auth-key"  http://localhost:8087/test/run-cleanup/google-ai-studio
-  curl "http://localhost:8087/api/compat/embeddings"  -H "Content-Type: application/json"   -H "Authorization: Bearer local-auth-key"  -H "cf-aig-authorization: Bearer locl-cf-api-token"    -d '{"input": "This is a test sentence for embeddings.", "model": "google-ai-studio/text-embedding-004"}'\n
-  curl -X POST http://localhost:8087/api/keys/add/google-ai-studio -H "Authorization: Bearer local-auth-key" -H "Content-Type: text/plain" --data "keys=AIzaSyDodA02wD3MtRB_b0zBjrvhLrGtcF_RcJc,AIzaSyBhjuhAKCq8cST3S8JdUbdyCJTI_c1y6GE,AIzaSyByoMeX_ayIbfEE00pHq7f9H4PJE0AAWQv"
+ # OpenAI-Compatible embeddings
+  curl "http://localhost:8087/api/compat/embeddings"  -H "Content-Type: application/json"   -H "Authorization: Bearer local-auth-key"  -H "cf-aig-authorization: Bearer locl-cf-api-token"    -d '{"input": "This is a test sentence for embeddings.", "model": "google-ai-studio/text-embedding-004"}'
+ # provider specific's gemini format 
   curl -X POST "http://localhost:8087/api/google-ai-studio/v1beta/models/text-embedding-004:batchEmbedContents" \
   -H "Content-Type: application/json" \
+  -H "cf-aig-authorization: Bearer local-cf-api-token" \
   -H "Authorization: Bearer local-auth-key" \
   -d '{"requests": [{"model": "models/text-embedding-004", "content": { "parts": [ { "text": "This is a test for the native
   Gemini API." } ] }}] }'
 
+ # test clean active keys but consecutive_failures > 50 * RECOVERY_THRESHOLD
+  curl -X POST -H "Authorization: Bearer local-auth-key"  http://localhost:8087/test/run-cleanup/google-ai-studio
+ # add keys to local db
+  curl -X POST http://localhost:8087/api/keys/add/google-ai-studio -H "Authorization: Bearer local-auth-key" -H "Content-Type: text/plain" --data "keys=AIzaSyDodA02wD3MtRB_b0zBjrvhLrGtcF_RcJc,AIzaSyBhjuhAKCq8cST3S8JdUbdyCJTI_c1y6GE,AIzaSyByoMeX_ayIbfEE00pHq7f9H4PJE0AAWQv"
+```
+ worker test:
+ ```bash
+  # provider specific's gemini format 
+  curl -X POST "https://xx.xxx.workers.dev/api/google-ai-studio/v1beta/models/text-embedding-004:batchEmbedContents" -H "Content-Type: application/json" -H "cf-aig-authorization: Bearer GRT1Y_kDjWuieTEH-JTYm-u8hPuKEqiDS8t784WR" -H "x-goog-api-key: AUTH_KEYvalue" -d '{"requests": [{"model": "models/text-embedding-004", "content": { "parts": [ { "text": "This is a test for the native Gemini API." } ] }}] }'
+  # OpenAI-Compatible embeddings
+  curl "https://xx.xxx.workers.dev/api/compat/embeddings"  -H "Content-Type: application/json"   -H "Authorization: Bearer AUTH_KEYvalue"  -H "cf-aig-authorization: Bearer GRT1Y_kDjWuieTEH-JTYm-u8hPuKEqiDS8t784WR"    -d '{"input": "This is a test sentence for embeddings.", "model": "google-ai-studio/text-embedding-004"}'
+ # OpenAI-Compatible chat
+  curl "https://xx.xxx.workers.dev/api/compat/chat/completions"  -H "Content-Type: application/json"   -H "Authorization: Bearer AUTH_KEYvalue"  -H "cf-aig-authorization: Bearer GRT1Y_kDjWuieTEH-JTYm-u8hPuKEqiDS8t784WR"  -d '{    "model": "google-ai-studio/gemini-2.5-pro",   "messages": [      {       "role": "user",        "content": "Hello!"      }   ]  }'
+
+ ```
 
 
-
-
-  ```
-
-
+## Debuging 
+### remote worker log: 
+* in the crates/theone-balance dir, npx wrangler tail  or 
+* just tail or 
+* dashboard on cloudflare: worker 
+### local log 
+* just dev console have the logs 
 
 
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+
+
+
+
+
 
 

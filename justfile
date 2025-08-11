@@ -26,6 +26,9 @@ migrate-remote:
 secrets-push:
     cd crates/theone-balance && pnpm run secrets:push
 
+tail:
+    cd crates/theone-balance && npx wrangler tail
+
 # --- CLI Commands ---
 
 # Build the sync-cli binary.
