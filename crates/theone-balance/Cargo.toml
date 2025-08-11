@@ -45,8 +45,6 @@ do_kv = []
 do_sqlite = ["worker/d1"] # The 'd1' worker feature enables DO SQLite storage.
 # Strategy 3: Main worker accesses a D1 database directly.
 raw_d1 = ["worker/d1"]
-# Strategy 4: An intentionally broken feature to prove a DO cannot access a D1 binding.
-do_d1 = ["worker/d1"]
 
 
 [dependencies]
