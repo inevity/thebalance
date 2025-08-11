@@ -309,12 +309,14 @@ pub async fn post_keys_list_handler(
     let mut action = String::new();
     let mut keys: Option<String> = None;
     let mut key_id: Vec<String> = Vec::new();
+    let mut model: Option<String> = None;
 
     for (key, value) in pairs {
         match key.as_str() {
             "action" => action = value,
             "keys" => keys = Some(value),
             "key_id[]" => key_id.push(value),
+            "model" => model = Some(value),
             _ => {} // Ignore other fields
         }
     }
@@ -360,8 +362,16 @@ pub async fn post_keys_list_handler(
             }
         }
     } else if form.action == "test" {
+        // Only allow testing for the google-ai-studio provider for now.
+        if provider != "google-ai-studio" {
+            warn!("Attempted to test keys for unsupported provider: {}", provider);
+            // Do nothing and just redirect.
+            return Redirect::to(&format!("/keys/{}", provider)).into_response();
+        }
+
         if !form.key_id.is_empty() {
-            let results = testing::test_keys(state, &provider, form.key_id)
+            let test_model = model.as_deref().unwrap_or("gemini-2.5-pro");
+            let results = testing::test_keys(state, &provider, test_model, form.key_id)
                 .await
                 .unwrap_or_else(|e| {
                     vec![testing::TestResult {
@@ -700,6 +710,31 @@ fn build_table_header(
         html! {}
     };
 
+    let test_controls = if provider == "google-ai-studio" {
+        html! {
+            div class="flex items-center gap-2" {
+                div class="relative" {
+                    input type="text" name="model" value="gemini-2.5-pro"
+                           placeholder="Test Model"
+                           class="input-field w-48 pr-4 py-2.5 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none text-sm shadow-sm";
+                }
+                button type="submit" name="action" value="test"
+                        class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-blue-600/25 hover:-translate-y-0.5 border border-blue-600" {
+                    "Test Selected"
+                }
+            }
+        }
+    } else {
+        html! {
+             button type="button"
+                    disabled
+                    title="Testing is only enabled for google-ai-studio currently"
+                    class="px-4 py-2.5 bg-gray-400 text-white font-semibold rounded-xl text-sm cursor-not-allowed border border-gray-400" {
+                "Test Selected"
+            }
+        }
+    };
+
     html! {
         div class="p-6 border-b border-gray-200/60 bg-white/30 backdrop-blur-sm" {
             div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4" {
@@ -717,10 +752,7 @@ fn build_table_header(
                     }
                 }
                 div class="flex items-center gap-2" {
-                    button type="submit" name="action" value="test"
-                            class="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-blue-600/25 hover:-translate-y-0.5 border border-blue-600" {
-                        "Test Selected"
-                    }
+                    (test_controls)
                     button type="submit" name="action" value="delete"
                             class="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-xl text-sm transition-all duration-200 hover:shadow-lg hover:shadow-red-600/25 hover:-translate-y-0.5 border border-red-600" {
                         "Delete Selected"
