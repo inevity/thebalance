@@ -1,0 +1,7 @@
+# clippy.toml
+
+# This file configures Clippy, the Rust linter.
+# By default, all standard lints are enabled.
+# You can add rules here to allow or deny specific lints for the entire project.
+# For example:
+# deny = ["unwrap_used"]

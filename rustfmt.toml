@@ -1,0 +1,6 @@
+# rustfmt.toml
+
+# Use the default Rust formatting.
+# Having this file in the repository root ensures that all contributors
+# use the same standard formatting rules enforced by `cargo fmt`.
+version = "Two"
