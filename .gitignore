@@ -9,3 +9,7 @@ Cargo.lock
 *.swn
 .vscode/
 .idea/
+node_modules/
+package.json
+pnpm-lock.yaml
+
