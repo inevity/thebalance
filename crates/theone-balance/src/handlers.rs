@@ -458,7 +458,7 @@ pub async fn forward(
                     (worker::Request::new_with_init(&native_endpoint, &req_init)?, false, true)
                 } else {
                     // 3. LOCAL Native Passthrough -> Native Gemini Endpoint
-                    let native_endpoint = format!("https://generativelanguage.googleapis.com/v1beta/{}", rest_resource.strip_prefix(&format!("{}/", provider)).unwrap_or(&rest_resource));
+                    let native_endpoint = format!("https://generativelanguage.googleapis.com/{}", rest_resource.strip_prefix(&format!("{}/", provider)).unwrap_or(&rest_resource));
                     let mut headers = worker::Headers::new();
                     headers.set("Content-Type", "application/json")?;
                     headers.set("x-goog-api-key", &selected_key.key)?;
