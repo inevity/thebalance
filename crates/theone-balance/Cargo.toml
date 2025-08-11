@@ -2,6 +2,12 @@
 name = "one-balance-rust"
 version = "0.1.0"
 edition = "2021"
+description = "An intelligent API gateway for routing requests to Cloudflare AI Gateway or native AI providers, built with Rust and running on Cloudflare Workers."
+authors = ["[inevity@approachai.com]"]
+license = "MIT"
+repository = "https://github.com/inevity/theone"
+keywords = ["cloudflare", "worker", "api-gateway", "rust", "ai"]
+categories = ["web-programming", "api-bindings"]
 
 [lib]
 crate-type = ["cdylib"]
