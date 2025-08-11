@@ -4,7 +4,7 @@ use tracing::info;
 use crate::cli::{
     args::SyncArgs,
     source::{KeySource, Source},
-    target::{KeyTarget, Target},
+    targets::{KeyTarget, Target},
 };
 
 pub struct App;
