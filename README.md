@@ -68,11 +68,10 @@ The system uses a multi-layered timeout strategy to ensure reliability and preve
 
 ### Technical Documentation
 
-For more detailed technical explanations of the patterns used, please see the following documents:
+For more detailed technical explanations of the patterns used, please see the following documents in the `/docs` directory:
 
-*   `theone/crates/theone-balance/HYBRID_ORM_PATTERN.md`: Explains the custom ORM-like system for interacting with the D1 database.
-*   `one-balance-rust/two-cache-design.md` (Not yet committed): Describes the caching strategy for optimizing performance.
-*   `one-balance-rust/tdd.md` (Not yet committed): Outlines the test-driven development approach used in the project.
+*   [`HYBRID_ORM_PATTERN.md`](./docs/HYBRID_ORM_PATTERN.md): Explains the custom ORM-like system for interacting with the D1 database.
+*   [`two-cache-design.md`](./docs/two-cache-design.md): Describes the caching strategy for optimizing performance.
 
 ## Prerequisites
 
